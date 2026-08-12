@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="description" content="OpenAB Client reference Web skeleton" />
+    <title>OpenAB Client</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main>
+      <p class="eyebrow">Community-led reference client</p>
+      <h1>OpenAB Client</h1>
+      <p class="lede">A native home for deploying, using, and observing OpenAB agents.</p>
+      <section aria-labelledby="connection-title">
+        <h2 id="connection-title">Connection</h2>
+        <p id="connection-state" role="status">No runtime connected.</p>
+        <button id="connect" type="button" disabled>Connect runtime</button>
+        <p class="hint">The first slice intentionally does not store credentials or connect to a deployment.</p>
+      </section>
+      <section aria-labelledby="scope-title">
+        <h2 id="scope-title">First slice</h2>
+        <ul>
+          <li>One Personal Agent</li>
+          <li>ACP session lifecycle</li>
+          <li>Safe connection and redaction boundaries</li>
+        </ul>
+      </section>
+    </main>
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
