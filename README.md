@@ -8,7 +8,7 @@ OpenAB Client is a Web-first interface for deploying, using, and observing OpenA
 
 ## Current scope
 
-- OpenAB ACP-over-WebSocket client contract and integration harness.
+- OpenAB ACP-over-WebSocket connection/authentication core, contract, and integration harness.
 - A dependency-free Web skeleton for a single Personal Agent.
 - Safe boundaries for connection, authentication, session creation, and redaction.
 
@@ -51,6 +51,20 @@ LLM CLI / agent runtime
 ```
 
 The supported wire baseline is documented in [docs/acp-contract.md](docs/acp-contract.md).
+
+## Local verification
+
+No package installation is required. The deterministic connection contract suite
+uses a local fake ACP server; the E2E uses the fixed OpenAB image already proven
+by T0b, with network disabled and no model prompt:
+
+```bash
+npm test
+npm run test:e2e
+```
+
+The Web skeleton remains deliberately thin until this shared connection core is
+accepted. It will consume this core rather than duplicate its auth or reconnect logic.
 
 ## Development status
 

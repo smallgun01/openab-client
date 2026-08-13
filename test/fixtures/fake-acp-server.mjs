@@ -1,0 +1,127 @@
+import { createHash } from "node:crypto";
+import { createServer } from "node:net";
+
+function acceptFor(key) {
+  return createHash("sha1").update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest("base64");
+}
+
+function frame(payload, opcode = 1) {
+  const body = Buffer.from(typeof payload === "string" ? payload : JSON.stringify(payload));
+  if (body.length >= 65_536) throw new Error("fixture only supports frames under 64 KiB");
+  if (body.length < 126) return Buffer.concat([Buffer.from([0x80 | opcode, body.length]), body]);
+  const header = Buffer.alloc(4);
+  header[0] = 0x80 | opcode;
+  header[1] = 126;
+  header.writeUInt16BE(body.length, 2);
+  return Buffer.concat([header, body]);
+}
+
+function parseFrames(buffer, onFrame) {
+  let remaining = buffer;
+  while (remaining.length >= 2) {
+    const masked = (remaining[1] & 0x80) !== 0;
+    let length = remaining[1] & 0x7f;
+    let lengthBytes = 0;
+    if (length === 126) {
+      if (remaining.length < 4) break;
+      length = remaining.readUInt16BE(2);
+      lengthBytes = 2;
+    }
+    if (length === 127) throw new Error("fixture does not support 64-bit WebSocket lengths");
+    const header = 2 + lengthBytes + (masked ? 4 : 0);
+    if (remaining.length < header + length) break;
+    const mask = masked ? remaining.subarray(2 + lengthBytes, 6 + lengthBytes) : null;
+    const payload = Buffer.from(remaining.subarray(header, header + length));
+    if (mask) for (let index = 0; index < payload.length; index += 1) payload[index] ^= mask[index % 4];
+    onFrame({ opcode: remaining[0] & 0x0f, payload: payload.toString("utf8") });
+    remaining = remaining.subarray(header + length);
+  }
+  return remaining;
+}
+
+/** A deliberately tiny, local ACP fixture; it never logs the bearer protocol. */
+export async function startFakeAcpServer({ mode = "normal", authKey = "valid-test-key" } = {}) {
+  const observations = { paths: [], keyInPath: false, bearerPresented: false };
+  const sockets = new Set();
+  const server = createServer((socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+    let handshake = Buffer.alloc(0);
+    let upgraded = false;
+    let frames = Buffer.alloc(0);
+
+    socket.on("data", (chunk) => {
+      if (socket.destroyed || socket.writableEnded) return;
+      if (!upgraded) {
+        handshake = Buffer.concat([handshake, chunk]);
+        const boundary = handshake.indexOf("\r\n\r\n");
+        if (boundary < 0) return;
+        const request = handshake.subarray(0, boundary).toString("utf8");
+        const rest = handshake.subarray(boundary + 4);
+        const [requestLine, ...headers] = request.split("\r\n");
+        const [, path] = requestLine.split(" ");
+        observations.paths.push(path);
+        observations.keyInPath ||= path.includes(authKey);
+        const headerMap = new Map(headers.map((line) => {
+          const delimiter = line.indexOf(":");
+          return [line.slice(0, delimiter).toLowerCase(), line.slice(delimiter + 1).trim()];
+        }));
+        const offered = headerMap.get("sec-websocket-protocol") ?? "";
+        observations.bearerPresented ||= offered.includes(`openab.bearer.${authKey}`);
+        if (mode === "reject" || !observations.bearerPresented) {
+          socket.end("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
+          return;
+        }
+        const key = headerMap.get("sec-websocket-key");
+        socket.write([
+          "HTTP/1.1 101 Switching Protocols",
+          "Upgrade: websocket",
+          "Connection: Upgrade",
+          `Sec-WebSocket-Accept: ${acceptFor(key)}`,
+          "Sec-WebSocket-Protocol: acp.v1",
+          "\r\n",
+        ].join("\r\n"));
+        upgraded = true;
+        if (mode === "stall") return;
+        if (rest.length) socket.emit("data", rest);
+        return;
+      }
+
+      if (mode === "stall") return;
+      frames = parseFrames(Buffer.concat([frames, chunk]), ({ opcode, payload }) => {
+        if (opcode === 8) {
+          if (!socket.writableEnded) socket.end(frame("", 8));
+          return;
+        }
+        if (opcode !== 1) return;
+        const request = JSON.parse(payload);
+        if (request.id === 1 && request.method === "initialize") {
+          if (mode === "protocol-error") {
+            socket.write(frame({ jsonrpc: "2.0", id: 1, result: { protocolVersion: 999, agentInfo: { name: "fake-openab" } } }));
+          } else {
+            socket.write(frame({ jsonrpc: "2.0", id: 1, result: { protocolVersion: 1, agentInfo: { name: "fake-openab" }, capabilities: { loadSession: false } } }));
+            if (mode === "disconnect") {
+              setTimeout(() => {
+                if (!socket.destroyed && !socket.writableEnded) socket.end(frame("", 8));
+              }, 5);
+            }
+          }
+        }
+        if (request.id === 2 && request.method === "session/new") {
+          socket.write(frame({ jsonrpc: "2.0", id: 2, result: { sessionId: "sess_fixture_1" } }));
+        }
+      });
+    });
+  });
+
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  return {
+    endpoint: `ws://127.0.0.1:${address.port}/acp`,
+    observations,
+    async close() {
+      for (const socket of sockets) socket.destroy();
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
