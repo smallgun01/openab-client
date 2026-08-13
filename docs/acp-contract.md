@@ -22,7 +22,9 @@ INITIALIZING
   ├─ ACP initialize v1 succeeds → READY
   └─ ACP error / incompatible response → FAILED
 READY
+  ├─ session/new starts → READY + sessionPending
   ├─ session/new succeeds → READY + server-minted sessionId
+  ├─ session/new rejects / times out → READY + session error (not an auth failure)
   ├─ socket close → DISCONNECTED (clear key + session)
   └─ explicit disconnect → DISCONNECTED (clear key + session)
 FAILED
@@ -52,7 +54,7 @@ The local preflight verified this lifecycle against a fixed OpenAB image twice w
 
 ## Harness acceptance
 
-The v0 implementation is accepted only when all six automated cases pass:
+The v0 implementation is accepted only when all twelve automated cases pass:
 
 | Case | Required outcome |
 | --- | --- |
@@ -62,8 +64,14 @@ The v0 implementation is accepted only when all six automated cases pass:
 | AC-04 | The key is offered only as the bearer subprotocol, never in the request URL. |
 | AC-05 | A silent server reaches the configured deadline; a fresh explicit connection with a new key can succeed. |
 | AC-06 | A remote close clears the in-memory session and returns to `DISCONNECTED`. |
+| AC-07 | A stalled `session/new` hits a bounded deadline and clears `sessionPending`. |
+| AC-08 | A remote close during `session/new` rejects the pending request and returns to `DISCONNECTED`. |
+| AC-09 | Explicit disconnect during `session/new` rejects the pending request. |
+| AC-10 | A second `session/new` is rejected locally while the first is in flight. |
+| AC-11 | A late response after `session/new` timeout cannot overwrite the timed-out state. |
+| AC-12 | The client refuses a WebSocket that did not negotiate `acp.v1`. |
 
-Run the deterministic fixture suite with `npm test` (no dependencies are installed). Run `npm run test:e2e` for the local-only real OpenAB runtime E2E. Both send no prompt and print no authentication key.
+Run the deterministic fixture suite with `npm test` (no dependencies are installed). GitHub Actions runs this suite on Node 22. Run `npm run test:e2e` for the opt-in local-only real OpenAB runtime E2E; it requires Docker and a local T0b fixture checkout. Both send no prompt and print no authentication key.
 
 ## Explicit v0 non-goals
 

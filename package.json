@@ -4,6 +4,9 @@
   "private": true,
   "description": "Community-led OpenAB Client reference implementation",
   "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "node --test test/connection-auth.test.mjs",
     "test:e2e": "node test/e2e-openab-acp.mjs"

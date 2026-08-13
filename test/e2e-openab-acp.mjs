@@ -5,15 +5,22 @@
  */
 import { randomBytes } from "node:crypto";
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const strategyRoot = path.resolve(repoRoot, "../openab-product-strategy");
+const strategyRoot = process.env.OPENAB_STRATEGY_ROOT
+  ? path.resolve(process.env.OPENAB_STRATEGY_ROOT)
+  : path.resolve(repoRoot, "../openab-product-strategy");
 const fixtureDir = path.join(strategyRoot, "t0b-fixture");
 const image = "ghcr.io/openabdev/openab@sha256:849f0f0a9031d1f7fd73af4a0a9e0c44ac3884cb2dacec43bf8d8428bbc8ff81";
 const authKey = `e2e.${randomBytes(24).toString("hex")}`;
 const container = `openab-client-e2e-${process.pid}-${Date.now()}`;
+
+if (!existsSync(fixtureDir)) {
+  throw new Error("OpenAB E2E fixture is missing; set OPENAB_STRATEGY_ROOT to a checkout containing t0b-fixture");
+}
 
 function run(command, args, options = {}) {
   const result = spawnSync(command, args, { encoding: "utf8", timeout: options.timeout ?? 20_000 });

@@ -54,13 +54,23 @@ The supported wire baseline is documented in [docs/acp-contract.md](docs/acp-con
 
 ## Local verification
 
-No package installation is required. The deterministic connection contract suite
+Node.js 22 or later is required (the smoke harness uses Node's global
+`WebSocket`). No package installation is required. The deterministic connection contract suite
 uses a local fake ACP server; the E2E uses the fixed OpenAB image already proven
 by T0b, with network disabled and no model prompt:
 
 ```bash
 npm test
 npm run test:e2e
+```
+
+`npm run test:e2e` is an opt-in local integration check, not a CI requirement:
+it requires Docker plus the T0b fixture checkout. By default it looks for the
+sibling `../openab-product-strategy/t0b-fixture`; another checkout can be named
+explicitly without embedding a local path in code:
+
+```bash
+OPENAB_STRATEGY_ROOT=/path/to/openab-product-strategy npm run test:e2e
 ```
 
 The Web skeleton remains deliberately thin until this shared connection core is

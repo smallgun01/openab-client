@@ -16,8 +16,9 @@ export const ConnectionErrorCode = Object.freeze({
 });
 
 export class ConnectionStateError extends Error {
-  constructor(message) {
+  constructor(message, code = null) {
     super(message);
     this.name = "ConnectionStateError";
+    this.code = code;
   }
 }

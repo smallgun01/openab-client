@@ -40,7 +40,7 @@ function parseFrames(buffer, onFrame) {
 }
 
 /** A deliberately tiny, local ACP fixture; it never logs the bearer protocol. */
-export async function startFakeAcpServer({ mode = "normal", authKey = "valid-test-key" } = {}) {
+export async function startFakeAcpServer({ mode = "normal", authKey = "valid-test-key", sessionDelayMs = 0 } = {}) {
   const observations = { paths: [], keyInPath: false, bearerPresented: false };
   const sockets = new Set();
   const server = createServer((socket) => {
@@ -73,14 +73,15 @@ export async function startFakeAcpServer({ mode = "normal", authKey = "valid-tes
           return;
         }
         const key = headerMap.get("sec-websocket-key");
-        socket.write([
+        const responseHeaders = [
           "HTTP/1.1 101 Switching Protocols",
           "Upgrade: websocket",
           "Connection: Upgrade",
           `Sec-WebSocket-Accept: ${acceptFor(key)}`,
-          "Sec-WebSocket-Protocol: acp.v1",
-          "\r\n",
-        ].join("\r\n"));
+        ];
+        if (mode !== "no-subprotocol") responseHeaders.push("Sec-WebSocket-Protocol: acp.v1");
+        responseHeaders.push("\r\n");
+        socket.write(responseHeaders.join("\r\n"));
         upgraded = true;
         if (mode === "stall") return;
         if (rest.length) socket.emit("data", rest);
@@ -107,8 +108,17 @@ export async function startFakeAcpServer({ mode = "normal", authKey = "valid-tes
             }
           }
         }
-        if (request.id === 2 && request.method === "session/new") {
-          socket.write(frame({ jsonrpc: "2.0", id: 2, result: { sessionId: "sess_fixture_1" } }));
+        if (request.method === "session/new") {
+          if (mode === "session-stall") return;
+          if (mode === "session-disconnect") {
+            socket.end(frame("", 8));
+            return;
+          }
+          const reply = () => {
+            if (!socket.destroyed && !socket.writableEnded) socket.write(frame({ jsonrpc: "2.0", id: request.id, result: { sessionId: `sess_fixture_${request.id}` } }));
+          };
+          if (sessionDelayMs > 0) setTimeout(reply, sessionDelayMs);
+          else reply();
         }
       });
     });

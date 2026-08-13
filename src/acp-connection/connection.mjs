@@ -1,9 +1,6 @@
 import { buildAcpSubprotocols, validateAcpEndpoint } from "./auth.mjs";
 import { ConnectionErrorCode, ConnectionStateError, ConnectionStatus } from "./types.mjs";
 
-const INITIALIZE_ID = 1;
-const SESSION_NEW_ID = 2;
-
 /**
  * Browser-compatible ACP connection state machine.
  * Secrets deliberately remain private and only for the active socket lifetime.
@@ -14,10 +11,19 @@ export class AcpConnection {
   #clearTimer;
   #timeoutMs;
   #socket;
-  #timer;
   #authKey;
+  #nextRequestId = 1;
+  #pendingRequests = new Map();
+  #sessionRequestId = null;
+  #connectAttempt = null;
   #listeners = new Set();
-  #state = Object.freeze({ status: ConnectionStatus.DISCONNECTED, sessionId: null, error: null, capability: null });
+  #state = Object.freeze({
+    status: ConnectionStatus.DISCONNECTED,
+    sessionId: null,
+    sessionPending: false,
+    error: null,
+    capability: null,
+  });
 
   constructor({ webSocketFactory = (url, protocols) => new WebSocket(url, protocols), timeoutMs = 10_000, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
     if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new TypeError("timeoutMs must be a positive number");
@@ -60,162 +66,223 @@ export class AcpConnection {
     this.#transition(ConnectionStatus.CONNECTING);
 
     return new Promise((resolve, reject) => {
-      let settled = false;
-      const settleReject = (code, message) => {
-        if (settled) return;
-        settled = true;
-        this.#fail(code, message);
-        reject(new ConnectionStateError(message));
-      };
-      const settleResolve = (result) => {
-        if (settled) return;
-        settled = true;
-        this.#clearDeadline();
-        resolve(result);
-      };
-
+      this.#connectAttempt = { resolve, reject };
+      let socket;
       try {
-        this.#socket = this.#webSocketFactory(url.toString(), protocols);
+        socket = this.#webSocketFactory(url.toString(), protocols);
+        this.#socket = socket;
       } catch {
-        settleReject(ConnectionErrorCode.CONNECTION_FAILED, "Unable to open ACP connection");
+        const error = new ConnectionStateError("Unable to open ACP connection", ConnectionErrorCode.CONNECTION_FAILED);
+        this.#fail(error.code, error.message);
         return;
       }
 
-      this.#timer = this.#setTimer(() => {
-        settleReject(ConnectionErrorCode.TIMEOUT, "ACP connection timed out");
-      }, this.#timeoutMs);
-
-      this.#socket.addEventListener("open", () => {
-        if (settled) return;
+      socket.addEventListener("open", () => {
+        if (this.#socket !== socket) return;
+        if (socket.protocol !== "acp.v1") {
+          const error = new ConnectionStateError("ACP did not negotiate the acp.v1 subprotocol", ConnectionErrorCode.PROTOCOL_ERROR);
+          this.#fail(error.code, error.message);
+          return;
+        }
         this.#transition(ConnectionStatus.INITIALIZING);
-        this.#send({
-          jsonrpc: "2.0",
-          id: INITIALIZE_ID,
-          method: "initialize",
-          params: {
-            protocolVersion: 1,
-            clientCapabilities: {},
-            clientInfo: { name: "openab-client", version: "0.1.0" },
-          },
-        }, settleReject);
+        void this.#initialize(socket);
       }, { once: true });
 
-      this.#socket.addEventListener("message", (event) => {
-        if (settled) return;
+      socket.addEventListener("message", (event) => {
+        if (this.#socket !== socket) return;
         let frame;
         try {
           frame = JSON.parse(String(event.data));
         } catch {
-          settleReject(ConnectionErrorCode.PROTOCOL_ERROR, "ACP returned a non-JSON response");
+          this.#fail(ConnectionErrorCode.PROTOCOL_ERROR, "ACP returned a non-JSON response");
           return;
         }
-
-        if (frame.id !== INITIALIZE_ID) return;
-        if (frame.error) {
-          settleReject(ConnectionErrorCode.INITIALIZE_REJECTED, "ACP rejected initialization");
-          return;
-        }
-        if (frame.result?.protocolVersion !== 1 || typeof frame.result?.agentInfo?.name !== "string") {
-          settleReject(ConnectionErrorCode.PROTOCOL_ERROR, "ACP returned an incompatible initialize response");
-          return;
-        }
-
-        const capability = Object.freeze({
-          protocolVersion: frame.result.protocolVersion,
-          agentName: frame.result.agentInfo.name,
-          loadSession: Boolean(frame.result.capabilities?.loadSession),
-        });
-        this.#transition(ConnectionStatus.READY, { capability });
-        settleResolve(capability);
+        this.#settleRequest(frame);
       });
 
       // Browser WebSocket deliberately hides HTTP handshake status. A 401 and a
       // network refusal therefore become the same safe, non-secret-bearing state.
-      this.#socket.addEventListener("error", () => {
-        settleReject(ConnectionErrorCode.CONNECTION_FAILED, "Unable to connect to ACP; check the endpoint and pairing key");
+      socket.addEventListener("error", () => {
+        if (this.#socket === socket) this.#fail(ConnectionErrorCode.CONNECTION_FAILED, "Unable to connect to ACP; check the endpoint and pairing key");
       }, { once: true });
 
-      this.#socket.addEventListener("close", () => {
-        if (!settled) {
-          settleReject(ConnectionErrorCode.CONNECTION_FAILED, "ACP connection closed before initialization completed");
+      socket.addEventListener("close", () => {
+        if (this.#socket !== socket) return;
+        if (this.#state.status === ConnectionStatus.CONNECTING || this.#state.status === ConnectionStatus.INITIALIZING) {
+          this.#fail(ConnectionErrorCode.CONNECTION_FAILED, "ACP connection closed before initialization completed");
           return;
         }
-        if (this.#state.status !== ConnectionStatus.FAILED) this.#clearConnection();
-      });
+        this.#clearConnection("ACP connection closed");
+      }, { once: true });
     });
   }
 
-  createSession({ cwd = "/tmp", mcpServers = [] } = {}) {
+  async createSession({ cwd = "/tmp", mcpServers = [] } = {}) {
     if (this.#state.status !== ConnectionStatus.READY || !this.#socket) {
       throw new ConnectionStateError("ACP session/new is only allowed while READY");
     }
+    if (this.#sessionRequestId !== null) {
+      throw new ConnectionStateError("ACP session/new is already in progress");
+    }
 
-    return new Promise((resolve, reject) => {
-      const onMessage = (event) => {
-        let frame;
-        try {
-          frame = JSON.parse(String(event.data));
-        } catch {
-          return;
-        }
-        if (frame.id !== SESSION_NEW_ID) return;
-        this.#socket.removeEventListener("message", onMessage);
-        if (frame.error || typeof frame.result?.sessionId !== "string" || !frame.result.sessionId.startsWith("sess_")) {
-          this.#transition(ConnectionStatus.READY, { error: { code: ConnectionErrorCode.SESSION_REJECTED, message: "ACP did not create a session" } });
-          reject(new ConnectionStateError("ACP did not create a session"));
-          return;
-        }
-        this.#transition(ConnectionStatus.READY, { sessionId: frame.result.sessionId });
-        resolve(frame.result.sessionId);
-      };
-      this.#socket.addEventListener("message", onMessage);
-      this.#send({ jsonrpc: "2.0", id: SESSION_NEW_ID, method: "session/new", params: { cwd, mcpServers } }, (code, message) => {
-        this.#socket.removeEventListener("message", onMessage);
-        reject(new ConnectionStateError(message));
-      });
+    const request = this.#startRequest({
+      method: "session/new",
+      params: { cwd, mcpServers },
+      timeoutMessage: "ACP session creation timed out",
     });
-  }
+    this.#sessionRequestId = request.id;
+    this.#transition(ConnectionStatus.READY, { sessionPending: true });
 
-  disconnect() {
-    this.#clearDeadline();
-    if (this.#socket) this.#socket.close();
-    this.#clearConnection();
-  }
-
-  #send(frame, onFailure) {
     try {
-      this.#socket.send(JSON.stringify(frame));
-    } catch {
-      onFailure(ConnectionErrorCode.CONNECTION_FAILED, "ACP connection could not send a request");
+      const frame = await request.promise;
+      if (frame.error || typeof frame.result?.sessionId !== "string" || !frame.result.sessionId.startsWith("sess_")) {
+        throw new ConnectionStateError("ACP did not create a session", ConnectionErrorCode.SESSION_REJECTED);
+      }
+      this.#transition(ConnectionStatus.READY, { sessionId: frame.result.sessionId, sessionPending: false });
+      return frame.result.sessionId;
+    } catch (error) {
+      if (this.#state.status === ConnectionStatus.READY) {
+        this.#transition(ConnectionStatus.READY, {
+          sessionPending: false,
+          error: { code: error.code ?? ConnectionErrorCode.CONNECTION_FAILED, message: error.message },
+        });
+      }
+      throw error;
+    } finally {
+      if (this.#sessionRequestId === request.id) {
+        this.#sessionRequestId = null;
+        if (this.#state.status === ConnectionStatus.READY && this.#state.sessionPending) {
+          this.#transition(ConnectionStatus.READY, { sessionPending: false });
+        }
+      }
     }
   }
 
+  disconnect() {
+    const socket = this.#socket;
+    this.#clearConnection("ACP connection disconnected");
+    if (socket) socket.close();
+  }
+
+  async #initialize(socket) {
+    const request = this.#startRequest({
+      method: "initialize",
+      params: {
+        protocolVersion: 1,
+        clientCapabilities: {},
+        clientInfo: { name: "openab-client", version: "0.1.0" },
+      },
+      timeoutMessage: "ACP connection timed out",
+    });
+
+    try {
+      const frame = await request.promise;
+      if (frame.error) {
+        throw new ConnectionStateError("ACP rejected initialization", ConnectionErrorCode.INITIALIZE_REJECTED);
+      }
+      if (frame.result?.protocolVersion !== 1 || typeof frame.result?.agentInfo?.name !== "string") {
+        throw new ConnectionStateError("ACP returned an incompatible initialize response", ConnectionErrorCode.PROTOCOL_ERROR);
+      }
+
+      const capability = Object.freeze({
+        protocolVersion: frame.result.protocolVersion,
+        agentName: frame.result.agentInfo.name,
+        loadSession: Boolean(frame.result.capabilities?.loadSession),
+      });
+      this.#transition(ConnectionStatus.READY, { capability });
+      this.#resolveConnect(capability);
+    } catch (error) {
+      if (this.#socket === socket) this.#fail(error.code ?? ConnectionErrorCode.CONNECTION_FAILED, error.message);
+    }
+  }
+
+  #startRequest({ method, params, timeoutMessage }) {
+    if (!this.#socket) throw new ConnectionStateError("ACP connection is not active", ConnectionErrorCode.CONNECTION_FAILED);
+    const id = this.#nextRequestId;
+    this.#nextRequestId += 1;
+
+    let rejectRequest;
+    const promise = new Promise((resolve, reject) => {
+      rejectRequest = reject;
+      const timer = this.#setTimer(() => {
+        const pending = this.#pendingRequests.get(id);
+        if (!pending) return;
+        this.#pendingRequests.delete(id);
+        reject(new ConnectionStateError(timeoutMessage, ConnectionErrorCode.TIMEOUT));
+      }, this.#timeoutMs);
+      this.#pendingRequests.set(id, { resolve, reject, timer });
+    });
+
+    try {
+      this.#socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+    } catch {
+      const pending = this.#pendingRequests.get(id);
+      this.#pendingRequests.delete(id);
+      this.#clearTimer(pending.timer);
+      rejectRequest(new ConnectionStateError("ACP connection could not send a request", ConnectionErrorCode.CONNECTION_FAILED));
+    }
+
+    return { id, promise };
+  }
+
+  #settleRequest(frame) {
+    const pending = this.#pendingRequests.get(frame.id);
+    if (!pending) return;
+    this.#pendingRequests.delete(frame.id);
+    this.#clearTimer(pending.timer);
+    pending.resolve(frame);
+  }
+
+  #rejectAllPending(message, code = ConnectionErrorCode.CONNECTION_FAILED) {
+    for (const [id, pending] of this.#pendingRequests) {
+      this.#pendingRequests.delete(id);
+      this.#clearTimer(pending.timer);
+      pending.reject(new ConnectionStateError(message, code));
+    }
+  }
+
+  #resolveConnect(capability) {
+    if (!this.#connectAttempt) return;
+    const { resolve } = this.#connectAttempt;
+    this.#connectAttempt = null;
+    resolve(capability);
+  }
+
+  #rejectConnect(message, code) {
+    if (!this.#connectAttempt) return;
+    const { reject } = this.#connectAttempt;
+    this.#connectAttempt = null;
+    reject(new ConnectionStateError(message, code));
+  }
+
   #fail(code, message) {
-    this.#clearDeadline();
-    if (this.#socket) this.#socket.close();
+    const socket = this.#socket;
+    this.#rejectAllPending(message, code);
+    this.#rejectConnect(message, code);
     this.#socket = null;
     this.#authKey = null;
-    this.#transition(ConnectionStatus.FAILED, { sessionId: null, error: { code, message }, capability: null });
+    this.#sessionRequestId = null;
+    this.#transition(ConnectionStatus.FAILED, { sessionId: null, sessionPending: false, error: { code, message }, capability: null });
+    if (socket) socket.close();
   }
 
-  #clearDeadline() {
-    if (this.#timer) this.#clearTimer(this.#timer);
-    this.#timer = null;
-  }
-
-  #clearConnection() {
-    this.#clearDeadline();
+  #clearConnection(message) {
+    this.#rejectAllPending(message);
+    this.#rejectConnect(message, ConnectionErrorCode.CONNECTION_FAILED);
     this.#socket = null;
     this.#authKey = null;
-    this.#transition(ConnectionStatus.DISCONNECTED, { sessionId: null, error: null, capability: null });
+    this.#sessionRequestId = null;
+    this.#transition(ConnectionStatus.DISCONNECTED, { sessionId: null, sessionPending: false, error: null, capability: null });
   }
 
   #transition(status, patch = {}) {
+    const value = (key, fallback) => Object.hasOwn(patch, key) ? patch[key] : fallback;
     this.#state = Object.freeze({
       status,
-      sessionId: patch.sessionId ?? (status === ConnectionStatus.READY ? this.#state.sessionId : null),
-      error: patch.error ?? null,
-      capability: patch.capability ?? (status === ConnectionStatus.READY ? this.#state.capability : null),
+      sessionId: value("sessionId", status === ConnectionStatus.READY ? this.#state.sessionId : null),
+      sessionPending: value("sessionPending", status === ConnectionStatus.READY ? this.#state.sessionPending : false),
+      error: value("error", null),
+      capability: value("capability", status === ConnectionStatus.READY ? this.#state.capability : null),
     });
     for (const listener of this.#listeners) listener(this.#state);
   }
