@@ -40,9 +40,22 @@ function parseFrames(buffer, onFrame) {
 }
 
 /** A deliberately tiny, local ACP fixture; it never logs the bearer protocol. */
-export async function startFakeAcpServer({ mode = "normal", authKey = "valid-test-key", sessionDelayMs = 0 } = {}) {
-  const observations = { paths: [], keyInPath: false, bearerPresented: false };
+export async function startFakeAcpServer({
+  mode = "normal",
+  authKey = "valid-test-key",
+  sessionDelayMs = 0,
+  promptHandler = null,
+  cancelHandler = null,
+} = {}) {
+  const observations = {
+    paths: [],
+    keyInPath: false,
+    bearerPresented: false,
+    promptRequests: [],
+    cancelNotifications: [],
+  };
   const sockets = new Set();
+  const activePrompts = new Map();
   const server = createServer((socket) => {
     sockets.add(socket);
     socket.once("close", () => sockets.delete(socket));
@@ -120,6 +133,68 @@ export async function startFakeAcpServer({ mode = "normal", authKey = "valid-tes
           };
           if (sessionDelayMs > 0) setTimeout(reply, sessionDelayMs);
           else reply();
+        }
+        if (request.method === "session/prompt") {
+          observations.promptRequests.push(request);
+          const sessionId = request.params?.sessionId;
+          activePrompts.set(sessionId, request);
+          const send = (payload) => {
+            if (!socket.destroyed && !socket.writableEnded) socket.write(frame(payload));
+          };
+          const context = {
+            request,
+            send,
+            update(text, overrides = {}) {
+              send({
+                jsonrpc: "2.0",
+                method: "session/update",
+                params: {
+                  sessionId,
+                  update: {
+                    sessionUpdate: "agent_message_chunk",
+                    content: { type: "text", text },
+                    ...overrides,
+                  },
+                },
+              });
+            },
+            finish(stopReason = "end_turn") {
+              activePrompts.delete(sessionId);
+              send({ jsonrpc: "2.0", id: request.id, result: { stopReason } });
+            },
+            fail(code = -32603, message = "fixture prompt error") {
+              activePrompts.delete(sessionId);
+              send({ jsonrpc: "2.0", id: request.id, error: { code, message } });
+            },
+            close() {
+              if (!socket.destroyed && !socket.writableEnded) socket.end(frame("", 8));
+            },
+          };
+          if (promptHandler) promptHandler(context);
+          else {
+            context.update("fixture reply");
+            context.finish();
+          }
+        }
+        if (request.method === "session/cancel") {
+          observations.cancelNotifications.push(request);
+          const sessionId = request.params?.sessionId;
+          const prompt = activePrompts.get(sessionId);
+          const send = (payload) => {
+            if (!socket.destroyed && !socket.writableEnded) socket.write(frame(payload));
+          };
+          const context = {
+            request,
+            prompt,
+            send,
+            finish(stopReason = "cancelled") {
+              if (!prompt) return;
+              activePrompts.delete(sessionId);
+              send({ jsonrpc: "2.0", id: prompt.id, result: { stopReason } });
+            },
+          };
+          if (cancelHandler) cancelHandler(context);
+          else context.finish();
         }
       });
     });

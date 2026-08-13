@@ -48,7 +48,7 @@ The local preflight verified this lifecycle against a fixed OpenAB image twice w
 
 ## Explicit non-guarantees
 
-- `session/prompt` is not exercised by this harness; it reaches the downstream LLM CLI and belongs to the valid-key runtime smoke gate.
+- `session/prompt` is not exercised by the real-image E2E harness; it reaches the downstream LLM CLI and belongs to the valid-key runtime smoke gate. Its text-turn, streaming, cancellation, and failure semantics are implemented against a fake ACP server under [chat-vertical-slice-contract.md](chat-vertical-slice-contract.md).
 - ACP base advertises `loadSession: false`; Client history replay needs a separate event/history design.
 - Structured tool activity, pairing, multi-device identity, tenant isolation, retention, export, and deletion are product work, not inferred from ACP transport availability.
 

@@ -12,11 +12,12 @@ OpenAB Client is a Web-first interface for deploying, using, and observing OpenA
 - A dependency-free Web connection UI for a single Personal Agent, driven only
   by the shared ACP state machine.
 - Safe boundaries for connection, authentication, session creation, and redaction.
+- A source-pinned text-turn core implementing CHAT-01..14 from the [chat vertical slice contract](docs/chat-vertical-slice-contract.md).
 
 ## Not in this repository yet
 
 - AWS bootstrap, BYOC provisioning, managed hosting, billing, or provider credentials.
-- Model prompts, tool execution, multi-agent orchestration, or production deployment.
+- Chat UI, provider-backed model prompts, tool execution, multi-agent orchestration, or production deployment.
 - History replay, structured tool activity, device pairing, or a complete observability product.
 
 Those are deliberately separate gates. A working `/acp` transport is not a claim that the full product UX already exists.
@@ -57,7 +58,7 @@ OpenAB runtime GET /acp
 LLM CLI / agent runtime
 ```
 
-The supported wire baseline is documented in [docs/acp-contract.md](docs/acp-contract.md).
+The accepted connection baseline is documented in [docs/acp-contract.md](docs/acp-contract.md). The text-turn state machine, wire behavior, cancellation caveat, and staged delivery gates are defined in [docs/chat-vertical-slice-contract.md](docs/chat-vertical-slice-contract.md).
 
 ## Local verification
 
@@ -86,11 +87,14 @@ does not send prompts or expose deployment controls.
 
 ## Development status
 
-The accepted ACP core and thin Web UI now complete authenticated
+The accepted ACP connection core and thin Web UI complete authenticated
 `connect → initialize → session/new → disconnect` in both the deterministic
 fixture and a real browser. The fixed OpenAB image E2E also passes without a
-model prompt. This repository still contains no provider credential, AWS
-bootstrap, deployment infrastructure, or chat/prompt implementation.
+model prompt. The text-turn core now implements `session/prompt`, ordered text
+updates, terminal stop reasons, bounded cancellation, deadlines, disconnects,
+and late-frame fencing against the fake ACP server. The repository still
+contains no chat UI, provider credential, provider-backed prompt smoke, AWS
+bootstrap, or deployment infrastructure.
 
 ## License
 

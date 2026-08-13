@@ -1,5 +1,22 @@
 import { buildAcpSubprotocols, validateAcpEndpoint } from "./auth.mjs";
-import { ConnectionErrorCode, ConnectionStateError, ConnectionStatus } from "./types.mjs";
+import {
+  ConnectionErrorCode,
+  ConnectionStateError,
+  ConnectionStatus,
+  TurnErrorCode,
+  TurnOutcome,
+  TurnStateError,
+  TurnStatus,
+} from "./types.mjs";
+
+const MAX_METHOD_FRAME_BYTES = 1 << 20;
+const STOP_REASON_OUTCOMES = Object.freeze({
+  end_turn: TurnOutcome.COMPLETED,
+  max_tokens: TurnOutcome.COMPLETED_LIMIT,
+  max_turn_requests: TurnOutcome.COMPLETED_LIMIT,
+  refusal: TurnOutcome.REFUSED,
+  cancelled: TurnOutcome.CANCELLED,
+});
 
 /**
  * Browser-compatible ACP connection state machine.
@@ -10,6 +27,8 @@ export class AcpConnection {
   #setTimer;
   #clearTimer;
   #timeoutMs;
+  #promptTimeoutMs;
+  #cancelGraceMs;
   #socket;
   #authKey;
   #nextRequestId = 1;
@@ -17,6 +36,8 @@ export class AcpConnection {
   #sessionRequestId = null;
   #connectAttempt = null;
   #listeners = new Set();
+  #turnListeners = new Set();
+  #activeTurn = null;
   #state = Object.freeze({
     status: ConnectionStatus.DISCONNECTED,
     sessionId: null,
@@ -24,11 +45,29 @@ export class AcpConnection {
     error: null,
     capability: null,
   });
+  #turnState = Object.freeze({
+    status: TurnStatus.IDLE,
+    text: "",
+    outcome: null,
+    stopReason: null,
+    error: null,
+  });
 
-  constructor({ webSocketFactory = (url, protocols) => new WebSocket(url, protocols), timeoutMs = 10_000, setTimer = setTimeout, clearTimer = clearTimeout } = {}) {
+  constructor({
+    webSocketFactory = (url, protocols) => new WebSocket(url, protocols),
+    timeoutMs = 10_000,
+    promptTimeoutMs = 180_000,
+    cancelGraceMs = 5_000,
+    setTimer = setTimeout,
+    clearTimer = clearTimeout,
+  } = {}) {
     if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new TypeError("timeoutMs must be a positive number");
+    if (!Number.isFinite(promptTimeoutMs) || promptTimeoutMs < 1) throw new TypeError("promptTimeoutMs must be a positive number");
+    if (!Number.isFinite(cancelGraceMs) || cancelGraceMs < 1) throw new TypeError("cancelGraceMs must be a positive number");
     this.#webSocketFactory = webSocketFactory;
     this.#timeoutMs = timeoutMs;
+    this.#promptTimeoutMs = promptTimeoutMs;
+    this.#cancelGraceMs = cancelGraceMs;
     // Browser host functions may reject a class instance as their receiver
     // (`Illegal invocation`). Call injected/default timers as plain functions.
     this.#setTimer = (...args) => setTimer(...args);
@@ -39,10 +78,20 @@ export class AcpConnection {
     return this.#state;
   }
 
+  get turnState() {
+    return this.#turnState;
+  }
+
   subscribe(listener) {
     this.#listeners.add(listener);
     listener(this.#state);
     return () => this.#listeners.delete(listener);
+  }
+
+  subscribeTurn(listener) {
+    this.#turnListeners.add(listener);
+    listener(this.#turnState);
+    return () => this.#turnListeners.delete(listener);
   }
 
   connect({ endpoint, authKey, allowInsecureLocalhost = false }) {
@@ -97,6 +146,10 @@ export class AcpConnection {
           frame = JSON.parse(String(event.data));
         } catch {
           this.#fail(ConnectionErrorCode.PROTOCOL_ERROR, "ACP returned a non-JSON response");
+          return;
+        }
+        if (frame?.method === "session/update") {
+          this.#handleSessionUpdate(frame);
           return;
         }
         this.#settleRequest(frame);
@@ -160,6 +213,104 @@ export class AcpConnection {
     }
   }
 
+  async sendPrompt(text) {
+    if (this.#state.status !== ConnectionStatus.READY || !this.#socket || !this.#state.sessionId) {
+      throw new TurnStateError("ACP prompt requires a ready session", TurnErrorCode.NOT_READY);
+    }
+    if (this.#activeTurn) {
+      throw new TurnStateError("An ACP prompt is already in progress", TurnErrorCode.PROMPT_IN_PROGRESS);
+    }
+    if (typeof text !== "string" || text.trim().length === 0) {
+      throw new TurnStateError("Prompt must contain text", TurnErrorCode.INVALID_PROMPT);
+    }
+
+    const sessionId = this.#state.sessionId;
+    const request = this.#startRequest({
+      method: "session/prompt",
+      params: { sessionId, prompt: [{ type: "text", text }] },
+      timeoutMessage: "ACP prompt timed out",
+      timeoutMs: this.#promptTimeoutMs,
+      maxFrameBytes: MAX_METHOD_FRAME_BYTES,
+    });
+    const turn = {
+      requestId: request.id,
+      sessionId,
+      text: "",
+      cancelSent: false,
+      cancelTimer: null,
+    };
+    this.#activeTurn = turn;
+    this.#transitionTurn(TurnStatus.WAITING);
+
+    try {
+      const frame = await request.promise;
+      if (frame.error) {
+        throw new TurnStateError("ACP rejected the prompt", TurnErrorCode.PROMPT_REJECTED);
+      }
+      const stopReason = frame.result?.stopReason;
+      const outcome = STOP_REASON_OUTCOMES[stopReason];
+      if (!outcome) {
+        throw new TurnStateError("ACP returned an invalid prompt result", TurnErrorCode.PROTOCOL_ERROR);
+      }
+      const result = Object.freeze({ outcome, stopReason, text: turn.text });
+      this.#transitionTurn(TurnStatus.SETTLED, result);
+      return result;
+    } catch (error) {
+      if (error?.code === TurnErrorCode.CANCELLED_LOCAL) {
+        const result = Object.freeze({
+          outcome: TurnOutcome.CANCELLED_LOCAL,
+          stopReason: null,
+          text: turn.text,
+        });
+        this.#transitionTurn(TurnStatus.SETTLED, result);
+        return result;
+      }
+
+      const turnError = this.#asTurnError(error);
+      this.#transitionTurn(TurnStatus.INTERRUPTED, {
+        text: turn.text,
+        error: { code: turnError.code, message: turnError.message },
+      });
+      throw turnError;
+    } finally {
+      if (this.#activeTurn?.requestId === request.id) {
+        if (turn.cancelTimer !== null) this.#clearTimer(turn.cancelTimer);
+        this.#activeTurn = null;
+        this.#transitionTurn(TurnStatus.IDLE);
+      }
+    }
+  }
+
+  cancelPrompt() {
+    const turn = this.#activeTurn;
+    if (!turn || ![TurnStatus.WAITING, TurnStatus.STREAMING].includes(this.#turnState.status)) {
+      throw new TurnStateError("There is no cancellable ACP prompt", TurnErrorCode.NOT_READY);
+    }
+    if (turn.cancelSent) return false;
+
+    try {
+      this.#socket.send(JSON.stringify({
+        jsonrpc: "2.0",
+        method: "session/cancel",
+        params: { sessionId: turn.sessionId },
+      }));
+    } catch {
+      this.#fail(ConnectionErrorCode.CONNECTION_FAILED, "ACP connection could not send cancellation");
+      return false;
+    }
+
+    turn.cancelSent = true;
+    this.#suspendRequestDeadline(turn.requestId);
+    this.#transitionTurn(TurnStatus.CANCELLING, { text: turn.text });
+    turn.cancelTimer = this.#setTimer(() => {
+      this.#rejectPendingRequest(
+        turn.requestId,
+        new TurnStateError("ACP cancellation confirmation timed out", TurnErrorCode.CANCELLED_LOCAL),
+      );
+    }, this.#cancelGraceMs);
+    return true;
+  }
+
   disconnect() {
     const socket = this.#socket;
     this.#clearConnection("ACP connection disconnected");
@@ -198,29 +349,29 @@ export class AcpConnection {
     }
   }
 
-  #startRequest({ method, params, timeoutMessage }) {
+  #startRequest({ method, params, timeoutMessage, timeoutMs = this.#timeoutMs, maxFrameBytes = null }) {
     if (!this.#socket) throw new ConnectionStateError("ACP connection is not active", ConnectionErrorCode.CONNECTION_FAILED);
     const id = this.#nextRequestId;
     this.#nextRequestId += 1;
+    const wire = JSON.stringify({ jsonrpc: "2.0", id, method, params });
+    if (maxFrameBytes !== null && new TextEncoder().encode(wire).byteLength > maxFrameBytes) {
+      throw new TurnStateError("ACP prompt exceeds the supported frame size", TurnErrorCode.FRAME_TOO_LARGE);
+    }
 
     let rejectRequest;
     const promise = new Promise((resolve, reject) => {
       rejectRequest = reject;
-      const timer = this.#setTimer(() => {
-        const pending = this.#pendingRequests.get(id);
-        if (!pending) return;
-        this.#pendingRequests.delete(id);
-        reject(new ConnectionStateError(timeoutMessage, ConnectionErrorCode.TIMEOUT));
-      }, this.#timeoutMs);
-      this.#pendingRequests.set(id, { resolve, reject, timer });
+      const pending = { resolve, reject, timer: null, timeoutMs, timeoutMessage };
+      this.#pendingRequests.set(id, pending);
+      this.#armRequestDeadline(id, pending);
     });
 
     try {
-      this.#socket.send(JSON.stringify({ jsonrpc: "2.0", id, method, params }));
+      this.#socket.send(wire);
     } catch {
       const pending = this.#pendingRequests.get(id);
       this.#pendingRequests.delete(id);
-      this.#clearTimer(pending.timer);
+      if (pending?.timer !== null && pending?.timer !== undefined) this.#clearTimer(pending.timer);
       rejectRequest(new ConnectionStateError("ACP connection could not send a request", ConnectionErrorCode.CONNECTION_FAILED));
     }
 
@@ -228,17 +379,64 @@ export class AcpConnection {
   }
 
   #settleRequest(frame) {
+    if (!frame || typeof frame !== "object") return;
     const pending = this.#pendingRequests.get(frame.id);
     if (!pending) return;
     this.#pendingRequests.delete(frame.id);
-    this.#clearTimer(pending.timer);
+    if (pending.timer !== null) this.#clearTimer(pending.timer);
     pending.resolve(frame);
+  }
+
+  #handleSessionUpdate(frame) {
+    const turn = this.#activeTurn;
+    if (!turn || ![TurnStatus.WAITING, TurnStatus.STREAMING].includes(this.#turnState.status)) return;
+    const params = frame.params;
+    const update = params?.update;
+    if (params?.sessionId !== turn.sessionId) return;
+    if (update?.sessionUpdate !== "agent_message_chunk") return;
+    if (update.content?.type !== "text" || typeof update.content.text !== "string" || update.content.text.length === 0) return;
+
+    turn.text += update.content.text;
+    this.#refreshRequestDeadline(turn.requestId);
+    this.#transitionTurn(TurnStatus.STREAMING, { text: turn.text });
+  }
+
+  #armRequestDeadline(id, pending) {
+    pending.timer = this.#setTimer(() => {
+      const current = this.#pendingRequests.get(id);
+      if (current !== pending) return;
+      this.#pendingRequests.delete(id);
+      pending.timer = null;
+      pending.reject(new ConnectionStateError(pending.timeoutMessage, ConnectionErrorCode.TIMEOUT));
+    }, pending.timeoutMs);
+  }
+
+  #refreshRequestDeadline(id) {
+    const pending = this.#pendingRequests.get(id);
+    if (!pending) return;
+    if (pending.timer !== null) this.#clearTimer(pending.timer);
+    this.#armRequestDeadline(id, pending);
+  }
+
+  #suspendRequestDeadline(id) {
+    const pending = this.#pendingRequests.get(id);
+    if (!pending || pending.timer === null) return;
+    this.#clearTimer(pending.timer);
+    pending.timer = null;
+  }
+
+  #rejectPendingRequest(id, error) {
+    const pending = this.#pendingRequests.get(id);
+    if (!pending) return;
+    this.#pendingRequests.delete(id);
+    if (pending.timer !== null) this.#clearTimer(pending.timer);
+    pending.reject(error);
   }
 
   #rejectAllPending(message, code = ConnectionErrorCode.CONNECTION_FAILED) {
     for (const [id, pending] of this.#pendingRequests) {
       this.#pendingRequests.delete(id);
-      this.#clearTimer(pending.timer);
+      if (pending.timer !== null) this.#clearTimer(pending.timer);
       pending.reject(new ConnectionStateError(message, code));
     }
   }
@@ -259,6 +457,7 @@ export class AcpConnection {
 
   #fail(code, message) {
     const socket = this.#socket;
+    this.#clearCancelTimer();
     this.#rejectAllPending(message, code);
     this.#rejectConnect(message, code);
     this.#socket = null;
@@ -269,6 +468,7 @@ export class AcpConnection {
   }
 
   #clearConnection(message) {
+    this.#clearCancelTimer();
     this.#rejectAllPending(message);
     this.#rejectConnect(message, ConnectionErrorCode.CONNECTION_FAILED);
     this.#socket = null;
@@ -287,5 +487,32 @@ export class AcpConnection {
       capability: value("capability", status === ConnectionStatus.READY ? this.#state.capability : null),
     });
     for (const listener of this.#listeners) listener(this.#state);
+  }
+
+  #transitionTurn(status, patch = {}) {
+    const value = (key, fallback) => Object.hasOwn(patch, key) ? patch[key] : fallback;
+    this.#turnState = Object.freeze({
+      status,
+      text: value("text", status === TurnStatus.IDLE ? "" : this.#turnState.text),
+      outcome: value("outcome", null),
+      stopReason: value("stopReason", null),
+      error: value("error", null),
+    });
+    for (const listener of this.#turnListeners) listener(this.#turnState);
+  }
+
+  #clearCancelTimer() {
+    if (this.#activeTurn?.cancelTimer !== null && this.#activeTurn?.cancelTimer !== undefined) {
+      this.#clearTimer(this.#activeTurn.cancelTimer);
+      this.#activeTurn.cancelTimer = null;
+    }
+  }
+
+  #asTurnError(error) {
+    if (error instanceof TurnStateError) return error;
+    if (error?.code === ConnectionErrorCode.TIMEOUT) {
+      return new TurnStateError("ACP prompt timed out", TurnErrorCode.TIMEOUT);
+    }
+    return new TurnStateError("ACP prompt was interrupted", TurnErrorCode.CONNECTION_FAILED);
   }
 }
