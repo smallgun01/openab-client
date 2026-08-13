@@ -8,7 +8,7 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test test/connection-auth.test.mjs",
+    "test": "node --test test/*.test.mjs",
     "test:e2e": "node test/e2e-openab-acp.mjs"
   }
 }

@@ -57,9 +57,9 @@ test("AC-04: the bearer is offered only as a WebSocket subprotocol, never in the
   });
 });
 
-test("AC-05: a stalled server reaches a bounded timeout, then a new key can retry", async () => {
+test("AC-05: a stalled server reaches a bounded timeout, then the same client can retry with a new key", async () => {
+  const connection = new AcpConnection({ timeoutMs: 30 });
   await withServer({ mode: "stall", authKey: "old-key" }, async (server) => {
-    const connection = new AcpConnection({ timeoutMs: 30 });
     await assert.rejects(
       connection.connect({ endpoint: server.endpoint, authKey: "old-key", allowInsecureLocalhost: true }),
       ConnectionStateError,
@@ -68,7 +68,28 @@ test("AC-05: a stalled server reaches a bounded timeout, then a new key can retr
   });
 
   await withServer({}, async (server) => {
-    const connection = new AcpConnection({ timeoutMs: 200 });
+    await connection.connect({ endpoint: server.endpoint, authKey: "valid-test-key", allowInsecureLocalhost: true });
+    assert.equal(connection.state.status, ConnectionStatus.READY);
+    connection.disconnect();
+  });
+});
+
+test("AC-05b: timer adapters are invoked without a browser-host receiver", async () => {
+  function browserTimer(...args) {
+    assert.equal(this, undefined);
+    return setTimeout(...args);
+  }
+  function browserClearTimer(...args) {
+    assert.equal(this, undefined);
+    return clearTimeout(...args);
+  }
+
+  await withServer({}, async (server) => {
+    const connection = new AcpConnection({
+      timeoutMs: 200,
+      setTimer: browserTimer,
+      clearTimer: browserClearTimer,
+    });
     await connection.connect({ endpoint: server.endpoint, authKey: "valid-test-key", allowInsecureLocalhost: true });
     assert.equal(connection.state.status, ConnectionStatus.READY);
     connection.disconnect();
@@ -100,7 +121,7 @@ test("AC-07: session/new rejects on its own deadline and clears the loading stat
 
 test("AC-08: a remote close rejects a pending session/new rather than leaving it loading", async () => {
   await withServer({ mode: "session-disconnect" }, async (server) => {
-    const connection = new AcpConnection({ timeoutMs: 200 });
+    const connection = new AcpConnection({ timeoutMs: 1_000 });
     await connection.connect({ endpoint: server.endpoint, authKey: "valid-test-key", allowInsecureLocalhost: true });
     await assert.rejects(connection.createSession(), (error) => error.code === ConnectionErrorCode.CONNECTION_FAILED);
     assert.equal(connection.state.status, ConnectionStatus.DISCONNECTED);

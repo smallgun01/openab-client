@@ -67,8 +67,9 @@ export async function startFakeAcpServer({ mode = "normal", authKey = "valid-tes
           return [line.slice(0, delimiter).toLowerCase(), line.slice(delimiter + 1).trim()];
         }));
         const offered = headerMap.get("sec-websocket-protocol") ?? "";
-        observations.bearerPresented ||= offered.includes(`openab.bearer.${authKey}`);
-        if (mode === "reject" || !observations.bearerPresented) {
+        const bearerPresented = offered.includes(`openab.bearer.${authKey}`);
+        observations.bearerPresented ||= bearerPresented;
+        if (mode === "reject" || !bearerPresented) {
           socket.end("HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n");
           return;
         }
@@ -96,11 +97,11 @@ export async function startFakeAcpServer({ mode = "normal", authKey = "valid-tes
         }
         if (opcode !== 1) return;
         const request = JSON.parse(payload);
-        if (request.id === 1 && request.method === "initialize") {
+        if (request.method === "initialize") {
           if (mode === "protocol-error") {
-            socket.write(frame({ jsonrpc: "2.0", id: 1, result: { protocolVersion: 999, agentInfo: { name: "fake-openab" } } }));
+            socket.write(frame({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: 999, agentInfo: { name: "fake-openab" } } }));
           } else {
-            socket.write(frame({ jsonrpc: "2.0", id: 1, result: { protocolVersion: 1, agentInfo: { name: "fake-openab" }, capabilities: { loadSession: false } } }));
+            socket.write(frame({ jsonrpc: "2.0", id: request.id, result: { protocolVersion: 1, agentInfo: { name: "fake-openab" }, capabilities: { loadSession: false } } }));
             if (mode === "disconnect") {
               setTimeout(() => {
                 if (!socket.destroyed && !socket.writableEnded) socket.end(frame("", 8));

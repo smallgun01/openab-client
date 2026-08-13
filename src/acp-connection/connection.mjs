@@ -29,8 +29,10 @@ export class AcpConnection {
     if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new TypeError("timeoutMs must be a positive number");
     this.#webSocketFactory = webSocketFactory;
     this.#timeoutMs = timeoutMs;
-    this.#setTimer = setTimer;
-    this.#clearTimer = clearTimer;
+    // Browser host functions may reject a class instance as their receiver
+    // (`Illegal invocation`). Call injected/default timers as plain functions.
+    this.#setTimer = (...args) => setTimer(...args);
+    this.#clearTimer = (...args) => clearTimer(...args);
   }
 
   get state() {

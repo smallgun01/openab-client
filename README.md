@@ -9,7 +9,8 @@ OpenAB Client is a Web-first interface for deploying, using, and observing OpenA
 ## Current scope
 
 - OpenAB ACP-over-WebSocket connection/authentication core, contract, and integration harness.
-- A dependency-free Web skeleton for a single Personal Agent.
+- A dependency-free Web connection UI for a single Personal Agent, driven only
+  by the shared ACP state machine.
 - Safe boundaries for connection, authentication, session creation, and redaction.
 
 ## Not in this repository yet
@@ -22,13 +23,19 @@ Those are deliberately separate gates. A working `/acp` transport is not a claim
 
 ## Quick start
 
-The static skeleton has no build step:
+The Web UI has no build step. Serve the repository root so the browser can load
+both `web/` and the shared `src/` modules:
 
 ```bash
-python3 -m http.server --directory web 8081
+python3 -m http.server 8081
+# open http://127.0.0.1:8081/web/
 ```
 
-It is intentionally disconnected by default. The ACP harness is run only against an OpenAB endpoint that an operator has already started:
+The UI accepts only `wss://` endpoints, except when the user explicitly enables
+the local-development `ws://localhost` allowance. It does not persist the
+pairing key and clears the credential field as soon as a connection attempt
+starts. The ACP harness is run only against an OpenAB endpoint that an operator
+has already started:
 
 ```bash
 OPENAB_ACP_URL=wss://example.invalid/acp \
@@ -73,12 +80,17 @@ explicitly without embedding a local path in code:
 OPENAB_STRATEGY_ROOT=/path/to/openab-product-strategy npm run test:e2e
 ```
 
-The Web skeleton remains deliberately thin until this shared connection core is
-accepted. It will consume this core rather than duplicate its auth or reconnect logic.
+The Web UI deliberately stops at `session/new`. It consumes the accepted shared
+connection core rather than duplicating auth, request, or reconnect logic; it
+does not send prompts or expose deployment controls.
 
 ## Development status
 
-The fixed OpenAB image used for the initial local preflight proved `/health` and authenticated `/acp` `initialize → session/new` twice without a model prompt. The next runtime gate is a separately authorized valid-key smoke test; this repository does not contain credentials or deployment infrastructure.
+The accepted ACP core and thin Web UI now complete authenticated
+`connect → initialize → session/new → disconnect` in both the deterministic
+fixture and a real browser. The fixed OpenAB image E2E also passes without a
+model prompt. This repository still contains no provider credential, AWS
+bootstrap, deployment infrastructure, or chat/prompt implementation.
 
 ## License
 

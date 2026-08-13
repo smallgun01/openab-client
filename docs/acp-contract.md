@@ -54,7 +54,7 @@ The local preflight verified this lifecycle against a fixed OpenAB image twice w
 
 ## Harness acceptance
 
-The v0 implementation is accepted only when all twelve automated cases pass:
+The v0 implementation is accepted only when all eighteen automated cases pass:
 
 | Case | Required outcome |
 | --- | --- |
@@ -62,7 +62,8 @@ The v0 implementation is accepted only when all twelve automated cases pass:
 | AC-02 | A handshake rejection reaches `FAILED/CONNECTION_FAILED`; the key appears in neither state nor URL. |
 | AC-03 | `session/new` before `READY` is rejected locally, without sending a wire request. |
 | AC-04 | The key is offered only as the bearer subprotocol, never in the request URL. |
-| AC-05 | A silent server reaches the configured deadline; a fresh explicit connection with a new key can succeed. |
+| AC-05 | A silent server reaches the configured deadline; the same client instance can explicitly connect again with a new key. |
+| AC-05b | Timer adapters are invoked without a browser-host receiver, preventing browser-only `Illegal invocation` failures. |
 | AC-06 | A remote close clears the in-memory session and returns to `DISCONNECTED`. |
 | AC-07 | A stalled `session/new` hits a bounded deadline and clears `sessionPending`. |
 | AC-08 | A remote close during `session/new` rejects the pending request and returns to `DISCONNECTED`. |
@@ -70,6 +71,7 @@ The v0 implementation is accepted only when all twelve automated cases pass:
 | AC-10 | A second `session/new` is rejected locally while the first is in flight. |
 | AC-11 | A late response after `session/new` timeout cannot overwrite the timed-out state. |
 | AC-12 | The client refuses a WebSocket that did not negotiate `acp.v1`. |
+| UI-01..05 | Pure state-to-screen mapping guards actions, distinguishes connection from session failure, and never renders arbitrary core error detail. |
 
 Run the deterministic fixture suite with `npm test` (no dependencies are installed). GitHub Actions runs this suite on Node 22. Run `npm run test:e2e` for the opt-in local-only real OpenAB runtime E2E; it requires Docker and a local T0b fixture checkout. Both send no prompt and print no authentication key.
 
@@ -77,4 +79,5 @@ Run the deterministic fixture suite with `npm test` (no dependencies are install
 
 - No browser storage, device pairing persistence, token refresh, history replay, multi-device identity, or automatic reconnect.
 - No provider credential, model prompt, tool call, AWS resource, or public endpoint.
-- The static Web skeleton is not yet wired to this core. Its next slice may display connection state, but it may not introduce a second connection implementation.
+- The Web UI stops at connection and `session/new`; it does not send prompts,
+  render model output, invoke tools, or expose deployment controls.
