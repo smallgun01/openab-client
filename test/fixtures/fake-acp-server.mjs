@@ -39,7 +39,22 @@ function parseFrames(buffer, onFrame) {
   return remaining;
 }
 
-/** A deliberately tiny, local ACP fixture; it never logs the bearer protocol. */
+/**
+ * @typedef {object} PromptContext
+ * @property {object} request Parsed session/prompt request.
+ * @property {(payload: object) => void} send Send an arbitrary server frame.
+ * @property {(text: string, overrides?: object) => void} update Send a text update.
+ * @property {(stopReason?: string) => void} finish Settle the prompt request.
+ * @property {(code?: number, message?: string) => void} fail Reject the prompt request.
+ * @property {() => void} close Close the fixture WebSocket.
+ */
+
+/**
+ * A deliberately tiny, local ACP fixture; it never logs the bearer protocol.
+ * @param {object} [options]
+ * @param {(context: PromptContext) => void} [options.promptHandler]
+ * @param {(context: object) => void} [options.cancelHandler]
+ */
 export async function startFakeAcpServer({
   mode = "normal",
   authKey = "valid-test-key",

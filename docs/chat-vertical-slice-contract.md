@@ -94,7 +94,7 @@ The response settles only the matching request ID. v0 handles every stop reason 
 | `refusal` | `REFUSED` |
 | `cancelled` | `CANCELLED` |
 
-An unknown stop reason is a turn-level `PROTOCOL_ERROR`, not a connection failure. Any partial text remains visible and is marked incomplete.
+An unknown non-empty string stop reason settles as `UNKNOWN` while preserving the raw reason for diagnostics and forward compatibility. A missing or non-string stop reason remains a turn-level `PROTOCOL_ERROR`, not a connection failure.
 
 ### Cancellation
 
@@ -106,7 +106,7 @@ An unknown stop reason is a turn-level `PROTOCOL_ERROR`, not a connection failur
 }
 ```
 
-This frame has no `id`, receives no direct response, and is emitted at most once for the active turn. The Client enters `CANCELLING` and waits for the original `session/prompt` response with `stopReason:"cancelled"`. A separate bounded cancellation grace timer prevents the UI from waiting forever; expiry settles the local turn as `CANCELLED_LOCAL` and fences all late frames.
+This frame has no `id`, receives no direct response, and is emitted at most once for the active turn. The Client enters `CANCELLING` and waits for the original `session/prompt` response with `stopReason:"cancelled"`. A separate bounded cancellation grace timer prevents the UI from waiting forever; expiry settles the local turn as `CANCELLED_LOCAL` and fences all late frames. If the cancel notification cannot be sent, only that turn is interrupted with `CANCEL_FAILED`; the Client fences its late frames but does not classify or close an otherwise `READY` connection.
 
 **Critical limitation:** at the pinned OpenAB revision, cancellation releases the gateway waiter but does not propagate to the downstream agent/model. The backend may continue computing and consuming provider quota. Therefore the UI label may say “Stop displaying” or “Stop waiting”; it must not promise that remote computation or billing stopped.
 
@@ -137,9 +137,10 @@ Rules:
 
 - Only one turn may be active. A second `sendPrompt` is rejected locally and sends nothing.
 - Input and Send are disabled while a turn is active; Stop is enabled only in `WAITING` or `STREAMING`.
-- Each active turn owns its request ID, session ID, accumulated text, idle timer, and optional cancel timer.
+- Each active turn owns its request ID, session ID, bounded accumulated text, idle timer, and optional cancel timer. v0 caps accumulated UTF-8 agent text at 1 MiB; overflow preserves only the valid prefix within the cap, interrupts the turn with `OUTPUT_TOO_LARGE`, and fences late frames.
 - Every settlement path clears both timers and removes the pending request exactly once.
-- A prompt idle deadline is mandatory and injectable for deterministic tests. The production default must be chosen with knowledge of OpenAB's current 180-second backend idle timeout; this contract does not silently hard-code a shorter product deadline.
+- A prompt idle deadline is mandatory and injectable for deterministic tests. `promptTimeoutMs` is a **per-chunk idle deadline** that refreshes after each accepted text chunk; it is not an absolute wall-clock bound, so a continuously streaming turn can exceed that duration. v0 has no separate absolute turn deadline. The production default must be chosen with knowledge of OpenAB's current 180-second backend idle timeout; this contract does not silently hard-code a shorter product deadline.
+- JSON-RPC busy code `-32001` maps to safe turn error `PROMPT_BUSY`; other server error messages remain redacted behind `PROMPT_REJECTED`.
 - JSON-RPC errors, deadline, and disconnect are turn failures. They do not overwrite the connection state machine's own classification.
 - Partial output survives interruption and receives a fixed safe status such as “Response interrupted.” Raw server or exception text is never rendered.
 
@@ -171,6 +172,8 @@ The fake ACP server must prove these cases before any provider-backed smoke:
 | CHAT-13 | Updates for another session and unsupported update variants are ignored. |
 | CHAT-14 | Empty input and a serialized prompt frame over 1 MiB are rejected locally. |
 | CHAT-15 | HTML/script-shaped content is displayed literally and never executed. |
+
+Hardening regressions additionally cover safe `-32001` mapping, future stop-reason fallback, cancel-send isolation, repeated Stop semantics, disconnect while `CANCELLING`, and the 1 MiB cumulative UTF-8 output cap. These refine CHAT-05/06/08/09/14 without expanding the v0 product surface.
 
 ## Delivery gates
 

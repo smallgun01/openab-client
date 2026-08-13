@@ -10,6 +10,8 @@ import {
 } from "./types.mjs";
 
 const MAX_METHOD_FRAME_BYTES = 1 << 20;
+const DEFAULT_MAX_TURN_TEXT_BYTES = 1 << 20;
+const TEXT_ENCODER = new TextEncoder();
 const STOP_REASON_OUTCOMES = Object.freeze({
   end_turn: TurnOutcome.COMPLETED,
   max_tokens: TurnOutcome.COMPLETED_LIMIT,
@@ -29,6 +31,7 @@ export class AcpConnection {
   #timeoutMs;
   #promptTimeoutMs;
   #cancelGraceMs;
+  #maxTurnTextBytes;
   #socket;
   #authKey;
   #nextRequestId = 1;
@@ -58,16 +61,19 @@ export class AcpConnection {
     timeoutMs = 10_000,
     promptTimeoutMs = 180_000,
     cancelGraceMs = 5_000,
+    maxTurnTextBytes = DEFAULT_MAX_TURN_TEXT_BYTES,
     setTimer = setTimeout,
     clearTimer = clearTimeout,
   } = {}) {
     if (!Number.isFinite(timeoutMs) || timeoutMs < 1) throw new TypeError("timeoutMs must be a positive number");
     if (!Number.isFinite(promptTimeoutMs) || promptTimeoutMs < 1) throw new TypeError("promptTimeoutMs must be a positive number");
     if (!Number.isFinite(cancelGraceMs) || cancelGraceMs < 1) throw new TypeError("cancelGraceMs must be a positive number");
+    if (!Number.isSafeInteger(maxTurnTextBytes) || maxTurnTextBytes < 1) throw new TypeError("maxTurnTextBytes must be a positive safe integer");
     this.#webSocketFactory = webSocketFactory;
     this.#timeoutMs = timeoutMs;
     this.#promptTimeoutMs = promptTimeoutMs;
     this.#cancelGraceMs = cancelGraceMs;
+    this.#maxTurnTextBytes = maxTurnTextBytes;
     // Browser host functions may reject a class instance as their receiver
     // (`Illegal invocation`). Call injected/default timers as plain functions.
     this.#setTimer = (...args) => setTimer(...args);
@@ -236,7 +242,7 @@ export class AcpConnection {
       requestId: request.id,
       sessionId,
       text: "",
-      cancelSent: false,
+      textBytes: 0,
       cancelTimer: null,
     };
     this.#activeTurn = turn;
@@ -245,13 +251,16 @@ export class AcpConnection {
     try {
       const frame = await request.promise;
       if (frame.error) {
+        if (frame.error.code === -32001) {
+          throw new TurnStateError("ACP is already processing a prompt", TurnErrorCode.PROMPT_BUSY);
+        }
         throw new TurnStateError("ACP rejected the prompt", TurnErrorCode.PROMPT_REJECTED);
       }
       const stopReason = frame.result?.stopReason;
-      const outcome = STOP_REASON_OUTCOMES[stopReason];
-      if (!outcome) {
+      if (typeof stopReason !== "string" || stopReason.length === 0) {
         throw new TurnStateError("ACP returned an invalid prompt result", TurnErrorCode.PROTOCOL_ERROR);
       }
+      const outcome = STOP_REASON_OUTCOMES[stopReason] ?? TurnOutcome.UNKNOWN;
       const result = Object.freeze({ outcome, stopReason, text: turn.text });
       this.#transitionTurn(TurnStatus.SETTLED, result);
       return result;
@@ -283,10 +292,10 @@ export class AcpConnection {
 
   cancelPrompt() {
     const turn = this.#activeTurn;
-    if (!turn || ![TurnStatus.WAITING, TurnStatus.STREAMING].includes(this.#turnState.status)) {
+    if (this.#state.status !== ConnectionStatus.READY || !this.#socket
+      || !turn || ![TurnStatus.WAITING, TurnStatus.STREAMING].includes(this.#turnState.status)) {
       throw new TurnStateError("There is no cancellable ACP prompt", TurnErrorCode.NOT_READY);
     }
-    if (turn.cancelSent) return false;
 
     try {
       this.#socket.send(JSON.stringify({
@@ -295,11 +304,13 @@ export class AcpConnection {
         params: { sessionId: turn.sessionId },
       }));
     } catch {
-      this.#fail(ConnectionErrorCode.CONNECTION_FAILED, "ACP connection could not send cancellation");
+      this.#rejectPendingRequest(
+        turn.requestId,
+        new TurnStateError("ACP cancellation could not be sent", TurnErrorCode.CANCEL_FAILED),
+      );
       return false;
     }
 
-    turn.cancelSent = true;
     this.#suspendRequestDeadline(turn.requestId);
     this.#transitionTurn(TurnStatus.CANCELLING, { text: turn.text });
     turn.cancelTimer = this.#setTimer(() => {
@@ -396,7 +407,25 @@ export class AcpConnection {
     if (update?.sessionUpdate !== "agent_message_chunk") return;
     if (update.content?.type !== "text" || typeof update.content.text !== "string" || update.content.text.length === 0) return;
 
-    turn.text += update.content.text;
+    const chunk = update.content.text;
+    const chunkBytes = TEXT_ENCODER.encode(chunk).byteLength;
+    const remainingBytes = this.#maxTurnTextBytes - turn.textBytes;
+    if (chunkBytes > remainingBytes) {
+      if (remainingBytes > 0) {
+        const prefix = takeUtf8Prefix(chunk, remainingBytes);
+        turn.text += prefix;
+        turn.textBytes += TEXT_ENCODER.encode(prefix).byteLength;
+        this.#transitionTurn(TurnStatus.STREAMING, { text: turn.text });
+      }
+      this.#rejectPendingRequest(
+        turn.requestId,
+        new TurnStateError("ACP response exceeded the supported text size", TurnErrorCode.OUTPUT_TOO_LARGE),
+      );
+      return;
+    }
+
+    turn.text += chunk;
+    turn.textBytes += chunkBytes;
     this.#refreshRequestDeadline(turn.requestId);
     this.#transitionTurn(TurnStatus.STREAMING, { text: turn.text });
   }
@@ -515,4 +544,16 @@ export class AcpConnection {
     }
     return new TurnStateError("ACP prompt was interrupted", TurnErrorCode.CONNECTION_FAILED);
   }
+}
+
+function takeUtf8Prefix(text, maxBytes) {
+  let result = "";
+  let usedBytes = 0;
+  for (const character of text) {
+    const characterBytes = TEXT_ENCODER.encode(character).byteLength;
+    if (usedBytes + characterBytes > maxBytes) break;
+    result += character;
+    usedBytes += characterBytes;
+  }
+  return result;
 }

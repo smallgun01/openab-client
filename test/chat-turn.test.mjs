@@ -40,6 +40,26 @@ async function withSession(serverOptions, run, connectionOptions = {}) {
   }
 }
 
+function cancelFailingWebSocketFactory(url, protocols) {
+  const socket = new WebSocket(url, protocols);
+  return {
+    get protocol() {
+      return socket.protocol;
+    },
+    addEventListener(...args) {
+      return socket.addEventListener(...args);
+    },
+    send(data) {
+      const payload = JSON.parse(String(data));
+      if (payload.method === "session/cancel") throw new Error("fixture cancel send failure");
+      return socket.send(data);
+    },
+    close() {
+      return socket.close();
+    },
+  };
+}
+
 test("CHAT-01: one text chunk and end_turn complete one agent reply", async () => {
   await withSession({
     promptHandler({ update, finish }) {
@@ -98,7 +118,7 @@ test("CHAT-04: a terminal response with no chunk completes an empty reply", asyn
   });
 });
 
-test("CHAT-05: every pinned stopReason maps to its declared outcome", async () => {
+test("CHAT-05: pinned and future stop reasons map without breaking the connection", async () => {
   const expected = new Map([
     ["end_turn", TurnOutcome.COMPLETED],
     ["max_tokens", TurnOutcome.COMPLETED_LIMIT],
@@ -116,10 +136,10 @@ test("CHAT-05: every pinned stopReason maps to its declared outcome", async () =
       assert.equal(result.stopReason, stopReason);
       assert.equal(result.outcome, outcome);
     }
-    await assert.rejects(
-      connection.sendPrompt("future_stop_reason"),
-      (error) => error.code === TurnErrorCode.PROTOCOL_ERROR,
-    );
+    const future = await connection.sendPrompt("future_stop_reason");
+    assert.equal(future.stopReason, "future_stop_reason");
+    assert.equal(future.outcome, TurnOutcome.UNKNOWN);
+    assert.equal(connection.state.status, ConnectionStatus.READY);
   });
 });
 
@@ -141,6 +161,21 @@ test("CHAT-06: a JSON-RPC error clears the turn and exposes only safe core copy"
     assert.equal(interrupted.error.code, TurnErrorCode.PROMPT_REJECTED);
     assert.equal(JSON.stringify(interrupted).includes("provider-secret"), false);
     assert.equal(connection.turnState.status, TurnStatus.IDLE);
+  });
+});
+
+test("CHAT-06b: OpenAB busy code maps to a safe, distinct turn error", async () => {
+  await withSession({
+    promptHandler({ fail }) {
+      fail(-32001, "sensitive upstream busy detail");
+    },
+  }, async ({ connection }) => {
+    await assert.rejects(
+      connection.sendPrompt("busy"),
+      (error) => error.code === TurnErrorCode.PROMPT_BUSY
+        && !error.message.includes("sensitive upstream"),
+    );
+    assert.equal(connection.state.status, ConnectionStatus.READY);
   });
 });
 
@@ -198,6 +233,71 @@ test("CHAT-09: Stop sends one no-id cancel and settles on the prompt response", 
     assert.equal(result.text, "before stop");
     assert.equal(server.observations.cancelNotifications.length, 1);
     assert.equal(Object.hasOwn(server.observations.cancelNotifications[0], "id"), false);
+  });
+});
+
+test("CHAT-09b: cancel send failure fences only the turn and keeps the connection READY", async () => {
+  let promptContext;
+  await withSession({
+    promptHandler(context) {
+      promptContext = context;
+      context.update("safe partial");
+    },
+  }, async ({ connection }) => {
+    const transitions = [];
+    connection.subscribeTurn((state) => transitions.push(state));
+    const prompt = connection.sendPrompt("cancel send fails");
+    await waitFor(() => connection.turnState.status === TurnStatus.STREAMING);
+
+    assert.equal(connection.cancelPrompt(), false);
+    await assert.rejects(prompt, (error) => error.code === TurnErrorCode.CANCEL_FAILED);
+    assert.equal(connection.state.status, ConnectionStatus.READY);
+
+    promptContext.update("late");
+    promptContext.finish("cancelled");
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    const interrupted = transitions.find((state) => state.status === TurnStatus.INTERRUPTED);
+    assert.equal(interrupted.text, "safe partial");
+    assert.equal(interrupted.error.code, TurnErrorCode.CANCEL_FAILED);
+    assert.equal(transitions.some((state) => state.text.includes("late")), false);
+  }, { webSocketFactory: cancelFailingWebSocketFactory });
+});
+
+test("CHAT-09c: a second Stop while CANCELLING is rejected locally", async () => {
+  await withSession({ promptHandler: ({ update }) => update("before stop") }, async ({ connection, server }) => {
+    const prompt = connection.sendPrompt("stop once");
+    await waitFor(() => connection.turnState.status === TurnStatus.STREAMING);
+    assert.equal(connection.cancelPrompt(), true);
+    assert.throws(
+      () => connection.cancelPrompt(),
+      (error) => error.code === TurnErrorCode.NOT_READY,
+    );
+    assert.equal((await prompt).outcome, TurnOutcome.CANCELLED);
+    assert.equal(server.observations.cancelNotifications.length, 1);
+  });
+});
+
+test("CHAT-09d: disconnect while CANCELLING preserves partial text as interrupted", async () => {
+  let promptContext;
+  await withSession({
+    promptHandler(context) {
+      promptContext = context;
+      context.update("partial before cancel");
+    },
+    cancelHandler() {},
+  }, async ({ connection }) => {
+    const transitions = [];
+    connection.subscribeTurn((state) => transitions.push(state));
+    const prompt = connection.sendPrompt("cancel then disconnect");
+    await waitFor(() => connection.turnState.status === TurnStatus.STREAMING);
+    connection.cancelPrompt();
+    assert.equal(connection.turnState.status, TurnStatus.CANCELLING);
+    promptContext.close();
+
+    await assert.rejects(prompt, (error) => error.code === TurnErrorCode.CONNECTION_FAILED);
+    const interrupted = transitions.find((state) => state.status === TurnStatus.INTERRUPTED);
+    assert.equal(interrupted.text, "partial before cancel");
+    assert.equal(connection.state.status, ConnectionStatus.DISCONNECTED);
   });
 });
 
@@ -317,4 +417,29 @@ test("CHAT-14: empty and over-1-MiB prompts are rejected before wire send", asyn
     assert.equal(result.text, "fixture reply");
     assert.equal(server.observations.promptRequests.length, 1);
   });
+});
+
+test("CHAT-14b: streamed text is capped by UTF-8 bytes and late frames are fenced", async () => {
+  let promptContext;
+  await withSession({
+    promptHandler(context) {
+      promptContext = context;
+      context.update("A😀BC");
+    },
+  }, async ({ connection }) => {
+    const transitions = [];
+    connection.subscribeTurn((state) => transitions.push(state));
+    const prompt = connection.sendPrompt("bounded output");
+    await assert.rejects(prompt, (error) => error.code === TurnErrorCode.OUTPUT_TOO_LARGE);
+
+    const interrupted = transitions.find((state) => state.status === TurnStatus.INTERRUPTED);
+    assert.equal(interrupted.text, "A😀B");
+    assert.equal(new TextEncoder().encode(interrupted.text).byteLength, 6);
+    assert.equal(connection.state.status, ConnectionStatus.READY);
+
+    promptContext.update("late");
+    promptContext.finish();
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(transitions.some((state) => state.text.includes("late")), false);
+  }, { maxTurnTextBytes: 6 });
 });
