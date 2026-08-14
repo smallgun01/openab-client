@@ -12,6 +12,7 @@ import {
 const MAX_METHOD_FRAME_BYTES = 1 << 20;
 const DEFAULT_MAX_TURN_TEXT_BYTES = 1 << 20;
 const TEXT_ENCODER = new TextEncoder();
+const TEXT_DECODER = new TextDecoder();
 const STOP_REASON_OUTCOMES = Object.freeze({
   end_turn: TurnOutcome.COMPLETED,
   max_tokens: TurnOutcome.COMPLETED_LIMIT,
@@ -304,11 +305,9 @@ export class AcpConnection {
         params: { sessionId: turn.sessionId },
       }));
     } catch {
-      this.#rejectPendingRequest(
-        turn.requestId,
-        new TurnStateError("ACP cancellation could not be sent", TurnErrorCode.CANCEL_FAILED),
-      );
-      return false;
+      const error = new TurnStateError("ACP cancellation could not be sent", TurnErrorCode.CANCEL_FAILED);
+      this.#rejectPendingRequest(turn.requestId, error);
+      throw error;
     }
 
     this.#suspendRequestDeadline(turn.requestId);
@@ -408,13 +407,14 @@ export class AcpConnection {
     if (update.content?.type !== "text" || typeof update.content.text !== "string" || update.content.text.length === 0) return;
 
     const chunk = update.content.text;
-    const chunkBytes = TEXT_ENCODER.encode(chunk).byteLength;
+    const encodedChunk = TEXT_ENCODER.encode(chunk);
+    const chunkBytes = encodedChunk.byteLength;
     const remainingBytes = this.#maxTurnTextBytes - turn.textBytes;
     if (chunkBytes > remainingBytes) {
       if (remainingBytes > 0) {
-        const prefix = takeUtf8Prefix(chunk, remainingBytes);
+        const { prefix, usedBytes } = takeUtf8Prefix(encodedChunk, remainingBytes);
         turn.text += prefix;
-        turn.textBytes += TEXT_ENCODER.encode(prefix).byteLength;
+        turn.textBytes += usedBytes;
         this.#transitionTurn(TurnStatus.STREAMING, { text: turn.text });
       }
       this.#rejectPendingRequest(
@@ -546,14 +546,11 @@ export class AcpConnection {
   }
 }
 
-function takeUtf8Prefix(text, maxBytes) {
-  let result = "";
-  let usedBytes = 0;
-  for (const character of text) {
-    const characterBytes = TEXT_ENCODER.encode(character).byteLength;
-    if (usedBytes + characterBytes > maxBytes) break;
-    result += character;
-    usedBytes += characterBytes;
-  }
-  return result;
+function takeUtf8Prefix(encodedText, maxBytes) {
+  let usedBytes = Math.min(encodedText.byteLength, maxBytes);
+  while (usedBytes > 0 && (encodedText[usedBytes] & 0xc0) === 0x80) usedBytes -= 1;
+  return {
+    prefix: TEXT_DECODER.decode(encodedText.subarray(0, usedBytes)),
+    usedBytes,
+  };
 }

@@ -55,7 +55,31 @@
         </div>
         <p id="session-state" class="detail" aria-live="polite">No session.</p>
         <button id="create-session" class="primary" type="button" disabled>Create session</button>
-        <p class="hint">This slice stops at <code>session/new</code>. It does not send a prompt, call a model, or run a tool.</p>
+        <p class="hint">A session unlocks the text-only chat UI below.</p>
+      </section>
+
+      <section aria-labelledby="chat-title">
+        <div class="section-heading">
+          <div>
+            <p class="step">Step 3</p>
+            <h2 id="chat-title">Chat</h2>
+          </div>
+          <p id="chat-state" class="state" role="status" aria-live="polite">Create a session to begin</p>
+        </div>
+
+        <div id="transcript" class="transcript" aria-live="polite" aria-label="Chat transcript" hidden></div>
+
+        <form id="chat-form">
+          <label for="prompt">Message</label>
+          <textarea id="prompt" name="prompt" rows="4" required placeholder="Send one text message" disabled></textarea>
+          <div class="actions">
+            <button id="send" class="primary" type="submit" disabled>Send</button>
+            <button id="stop" type="button" disabled>Stop waiting</button>
+          </div>
+        </form>
+
+        <p id="chat-error" class="error" role="alert" hidden></p>
+        <p class="hint">Messages render as literal text only—no Markdown, HTML, links, tools, or persistence. “Stop waiting” does not guarantee remote computation or billing has stopped.</p>
       </section>
     </main>
     <script type="module" src="app.js"></script>

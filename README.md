@@ -17,7 +17,7 @@ OpenAB Client is a Web-first interface for deploying, using, and observing OpenA
 ## Not in this repository yet
 
 - AWS bootstrap, BYOC provisioning, managed hosting, billing, or provider credentials.
-- Chat UI, provider-backed model prompts, tool execution, multi-agent orchestration, or production deployment.
+- Provider-backed model prompts, tool execution, multi-agent orchestration, or production deployment.
 - History replay, structured tool activity, device pairing, or a complete observability product.
 
 Those are deliberately separate gates. A working `/acp` transport is not a claim that the full product UX already exists.
@@ -81,9 +81,11 @@ explicitly without embedding a local path in code:
 OPENAB_STRATEGY_ROOT=/path/to/openab-product-strategy npm run test:e2e
 ```
 
-The Web UI deliberately stops at `session/new`. It consumes the accepted shared
-connection core rather than duplicating auth, request, or reconnect logic; it
-does not send prompts or expose deployment controls.
+The Web UI consumes the accepted shared connection and turn cores rather than
+duplicating auth, request, or reconnect logic. Its chat UI sends one text
+prompt at a time, renders responses as literal text, and exposes a bounded
+“Stop waiting” action. It does not interpret Markdown/HTML, run tools, persist
+history, call a configured provider by itself, or expose deployment controls.
 
 ## Development status
 
@@ -92,9 +94,10 @@ The accepted ACP connection core and thin Web UI complete authenticated
 fixture and a real browser. The fixed OpenAB image E2E also passes without a
 model prompt. The text-turn core now implements `session/prompt`, ordered text
 updates, terminal stop reasons, bounded cancellation, deadlines, disconnects,
-and late-frame fencing against the fake ACP server. The repository still
-contains no chat UI, provider credential, provider-backed prompt smoke, AWS
-bootstrap, or deployment infrastructure.
+and late-frame fencing against the fake ACP server. The thin chat UI implements
+the CHAT-15 literal-text boundary. The repository still contains no provider
+credential, provider-backed prompt smoke, AWS bootstrap, or deployment
+infrastructure.
 
 ## License
 

@@ -1,6 +1,6 @@
 # Chat vertical slice contract — v0
 
-**Status:** Accepted contract. CHAT-01..14 core behavior is implemented locally; CHAT-15 browser rendering and provider-backed runtime smoke are not included yet.
+**Status:** Accepted contract. CHAT-01..14 core behavior and the CHAT-15 thin browser UI are implemented locally; provider-backed runtime smoke is not included.
 
 This contract defines the smallest useful chat turn on top of the accepted ACP connection core. It is deliberately narrower than the full ACP schema: one connected session, one text prompt in flight, streamed text output, bounded cancellation, and deterministic settlement.
 
@@ -173,13 +173,13 @@ The fake ACP server must prove these cases before any provider-backed smoke:
 | CHAT-14 | Empty input and a serialized prompt frame over 1 MiB are rejected locally. |
 | CHAT-15 | HTML/script-shaped content is displayed literally and never executed. |
 
-Hardening regressions additionally cover safe `-32001` mapping, future stop-reason fallback, cancel-send isolation, repeated Stop semantics, disconnect while `CANCELLING`, and the 1 MiB cumulative UTF-8 output cap. These refine CHAT-05/06/08/09/14 without expanding the v0 product surface.
+Hardening regressions additionally cover safe `-32001` mapping, future stop-reason fallback, cancel-send isolation, repeated Stop semantics, disconnect while `CANCELLING`, and the 1 MiB cumulative UTF-8 output cap. These refine CHAT-05/06/08/09/14 without expanding the v0 product scope.
 
 ## Delivery gates
 
 1. **Contract gate — accepted:** this document was reviewed against the pinned upstream schema and implementation.
 2. **Core gate — implemented locally:** fake-server tests implement CHAT-01..14 without DOM or provider credentials.
-3. **UI gate:** the thin chat surface implements CHAT-15 plus Send/Stop/state behavior in a real browser.
+3. **UI gate — passed locally:** the thin chat UI implements CHAT-15 plus Send/Stop/state behavior. Isolated Chromium rendered user and agent HTML/script-shaped payloads literally with zero executable message nodes or side effects; Stop preserved partial text and returned the UI to an eligible next turn. Publication and independent review remain separate gates.
 4. **Runtime gate:** a real OpenAB prompt smoke is allowed only with an isolated provider key, bounded budget, verified redaction, and a tested revoke path. It must explicitly record that Stop does not yet cancel backend work.
 
 Passing this contract does not authorize AWS deployment, Studio integration, provider-key creation, or production release.

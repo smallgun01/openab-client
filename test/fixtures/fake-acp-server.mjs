@@ -7,12 +7,18 @@ function acceptFor(key) {
 
 function frame(payload, opcode = 1) {
   const body = Buffer.from(typeof payload === "string" ? payload : JSON.stringify(payload));
-  if (body.length >= 65_536) throw new Error("fixture only supports frames under 64 KiB");
   if (body.length < 126) return Buffer.concat([Buffer.from([0x80 | opcode, body.length]), body]);
-  const header = Buffer.alloc(4);
+  if (body.length < 65_536) {
+    const header = Buffer.alloc(4);
+    header[0] = 0x80 | opcode;
+    header[1] = 126;
+    header.writeUInt16BE(body.length, 2);
+    return Buffer.concat([header, body]);
+  }
+  const header = Buffer.alloc(10);
   header[0] = 0x80 | opcode;
-  header[1] = 126;
-  header.writeUInt16BE(body.length, 2);
+  header[1] = 127;
+  header.writeBigUInt64BE(BigInt(body.length), 2);
   return Buffer.concat([header, body]);
 }
 
@@ -27,7 +33,13 @@ function parseFrames(buffer, onFrame) {
       length = remaining.readUInt16BE(2);
       lengthBytes = 2;
     }
-    if (length === 127) throw new Error("fixture does not support 64-bit WebSocket lengths");
+    if (length === 127) {
+      if (remaining.length < 10) break;
+      const wideLength = remaining.readBigUInt64BE(2);
+      if (wideLength > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("fixture frame is too large");
+      length = Number(wideLength);
+      lengthBytes = 8;
+    }
     const header = 2 + lengthBytes + (masked ? 4 : 0);
     if (remaining.length < header + length) break;
     const mask = masked ? remaining.subarray(2 + lengthBytes, 6 + lengthBytes) : null;

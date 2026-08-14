@@ -249,7 +249,10 @@ test("CHAT-09b: cancel send failure fences only the turn and keeps the connectio
     const prompt = connection.sendPrompt("cancel send fails");
     await waitFor(() => connection.turnState.status === TurnStatus.STREAMING);
 
-    assert.equal(connection.cancelPrompt(), false);
+    assert.throws(
+      () => connection.cancelPrompt(),
+      (error) => error.code === TurnErrorCode.CANCEL_FAILED,
+    );
     await assert.rejects(prompt, (error) => error.code === TurnErrorCode.CANCEL_FAILED);
     assert.equal(connection.state.status, ConnectionStatus.READY);
 
@@ -442,4 +445,30 @@ test("CHAT-14b: streamed text is capped by UTF-8 bytes and late frames are fence
     await new Promise((resolve) => setTimeout(resolve, 15));
     assert.equal(transitions.some((state) => state.text.includes("late")), false);
   }, { maxTurnTextBytes: 6 });
+});
+
+test("CHAT-14c: the default cumulative output cap is exactly 1 MiB", async () => {
+  let promptContext;
+  await withSession({
+    promptHandler(context) {
+      promptContext = context;
+      context.update(`${"x".repeat(1 << 20)}y`);
+    },
+  }, async ({ connection }) => {
+    const transitions = [];
+    connection.subscribeTurn((state) => transitions.push(state));
+    await assert.rejects(
+      connection.sendPrompt("default bounded output"),
+      (error) => error.code === TurnErrorCode.OUTPUT_TOO_LARGE,
+    );
+
+    const interrupted = transitions.find((state) => state.status === TurnStatus.INTERRUPTED);
+    assert.equal(interrupted.text.length, 1 << 20);
+    assert.equal(new TextEncoder().encode(interrupted.text).byteLength, 1 << 20);
+
+    promptContext.update("late");
+    promptContext.finish();
+    await new Promise((resolve) => setTimeout(resolve, 15));
+    assert.equal(transitions.some((state) => state.text.endsWith("late")), false);
+  });
 });
