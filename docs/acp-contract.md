@@ -73,7 +73,7 @@ The v0 implementation is accepted only when all eighteen automated cases pass:
 | AC-12 | The client refuses a WebSocket that did not negotiate `acp.v1`. |
 | UI-01..05 | Pure state-to-screen mapping guards actions, distinguishes connection from session failure, and never renders arbitrary core error detail. |
 
-Run the deterministic fixture suite with `npm test` (no dependencies are installed). GitHub Actions runs this suite on Node 22. Run `npm run test:e2e` for the opt-in local-only real OpenAB runtime E2E; it requires Docker and a local T0b fixture checkout. Both send no prompt and print no authentication key.
+Run `npm ci` to install the exact dev-only test dependencies, then run the deterministic fixture suite with `npm test`. GitHub Actions runs that suite on Node 22 and separately runs the Chromium-only browser contract with `npm run test:browser`. Run `npm run test:e2e` for the opt-in local-only real OpenAB runtime E2E; it requires Docker and a local T0b fixture checkout. The connection fixture suite and fixed-image E2E send no provider prompt and print no authentication key.
 
 ## Explicit v0 non-goals
 

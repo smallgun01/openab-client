@@ -1,6 +1,6 @@
 # Chat vertical slice contract — v0
 
-**Status:** Accepted contract. CHAT-01..14 core behavior and the CHAT-15 thin browser UI are implemented locally; provider-backed runtime smoke is not included.
+**Status:** Accepted contract. CHAT-01..14 core behavior and the CHAT-15 thin browser UI are published and independently approved; provider-backed runtime smoke is not included.
 
 This contract defines the smallest useful chat turn on top of the accepted ACP connection core. It is deliberately narrower than the full ACP schema: one connected session, one text prompt in flight, streamed text output, bounded cancellation, and deterministic settlement.
 
@@ -106,7 +106,7 @@ An unknown non-empty string stop reason settles as `UNKNOWN` while preserving th
 }
 ```
 
-This frame has no `id`, receives no direct response, and is emitted at most once for the active turn. The Client enters `CANCELLING` and waits for the original `session/prompt` response with `stopReason:"cancelled"`. A separate bounded cancellation grace timer prevents the UI from waiting forever; expiry settles the local turn as `CANCELLED_LOCAL` and fences all late frames. If the cancel notification cannot be sent, only that turn is interrupted with `CANCEL_FAILED`; the Client fences its late frames but does not classify or close an otherwise `READY` connection.
+This frame has no `id`, receives no direct response, and is emitted at most once for the active turn. On a successful send, `cancelPrompt()` returns `true`, the Client enters `CANCELLING`, and it waits for the original `session/prompt` response with `stopReason:"cancelled"`. A separate bounded cancellation grace timer prevents the UI from waiting forever; expiry settles the local turn as `CANCELLED_LOCAL` and fences all late frames. If the cancel notification cannot be sent, `cancelPrompt()` synchronously throws a `TurnStateError` with code `CANCEL_FAILED`, and the active `sendPrompt()` promise rejects with the same code. Only that turn is interrupted; the Client fences its late frames but does not classify or close an otherwise `READY` connection. This failure path does not return `false`.
 
 **Critical limitation:** at the pinned OpenAB revision, cancellation releases the gateway waiter but does not propagate to the downstream agent/model. The backend may continue computing and consuming provider quota. Therefore the UI label may say “Stop displaying” or “Stop waiting”; it must not promise that remote computation or billing stopped.
 
@@ -173,13 +173,13 @@ The fake ACP server must prove these cases before any provider-backed smoke:
 | CHAT-14 | Empty input and a serialized prompt frame over 1 MiB are rejected locally. |
 | CHAT-15 | HTML/script-shaped content is displayed literally and never executed. |
 
-Hardening regressions additionally cover safe `-32001` mapping, future stop-reason fallback, cancel-send isolation, repeated Stop semantics, disconnect while `CANCELLING`, and the 1 MiB cumulative UTF-8 output cap. These refine CHAT-05/06/08/09/14 without expanding the v0 product scope.
+Hardening regressions additionally cover safe `-32001` mapping, future stop-reason fallback, cancel-send isolation, repeated Stop semantics, disconnect while `CANCELLING`, the 1 MiB cumulative UTF-8 output cap, and the fake WebSocket parser's 16-bit-marker/127-byte payload boundary. These refine CHAT-05/06/08/09/14 without expanding the v0 product scope.
 
 ## Delivery gates
 
 1. **Contract gate — accepted:** this document was reviewed against the pinned upstream schema and implementation.
-2. **Core gate — implemented locally:** fake-server tests implement CHAT-01..14 without DOM or provider credentials.
-3. **UI gate — passed locally:** the thin chat UI implements CHAT-15 plus Send/Stop/state behavior. Isolated Chromium rendered user and agent HTML/script-shaped payloads literally with zero executable message nodes or side effects; Stop preserved partial text and returned the UI to an eligible next turn. Publication and independent review remain separate gates.
+2. **Core gate — published and approved:** fake-server tests implement CHAT-01..14 without DOM or provider credentials.
+3. **UI gate — published, approved, and automated:** the thin chat UI implements CHAT-15 plus Send/Stop/state behavior. The Chromium-only Playwright gate renders user and agent HTML/script-shaped payloads literally with zero executable message nodes, side effects, or browser storage; it also proves that Stop preserves partial text, keeps the remote-work caveat, and returns the UI to an eligible next turn. GitHub Actions runs this gate after the deterministic Node suite.
 4. **Runtime gate:** a real OpenAB prompt smoke is allowed only with an isolated provider key, bounded budget, verified redaction, and a tested revoke path. It must explicitly record that Stop does not yet cancel backend work.
 
 Passing this contract does not authorize AWS deployment, Studio integration, provider-key creation, or production release.

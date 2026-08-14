@@ -9,6 +9,10 @@
   },
   "scripts": {
     "test": "node --test test/*.test.mjs",
+    "test:browser": "playwright test",
     "test:e2e": "node test/e2e-openab-acp.mjs"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1"
   }
 }

@@ -22,18 +22,19 @@ function frame(payload, opcode = 1) {
   return Buffer.concat([header, body]);
 }
 
-function parseFrames(buffer, onFrame) {
+export function parseFrames(buffer, onFrame) {
   let remaining = buffer;
   while (remaining.length >= 2) {
     const masked = (remaining[1] & 0x80) !== 0;
-    let length = remaining[1] & 0x7f;
+    const lengthMarker = remaining[1] & 0x7f;
+    let length = lengthMarker;
     let lengthBytes = 0;
-    if (length === 126) {
+    if (lengthMarker === 126) {
       if (remaining.length < 4) break;
       length = remaining.readUInt16BE(2);
       lengthBytes = 2;
     }
-    if (length === 127) {
+    if (lengthMarker === 127) {
       if (remaining.length < 10) break;
       const wideLength = remaining.readBigUInt64BE(2);
       if (wideLength > BigInt(Number.MAX_SAFE_INTEGER)) throw new Error("fixture frame is too large");

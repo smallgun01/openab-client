@@ -9,8 +9,8 @@ OpenAB Client is a Web-first interface for deploying, using, and observing OpenA
 ## Current scope
 
 - OpenAB ACP-over-WebSocket connection/authentication core, contract, and integration harness.
-- A dependency-free Web connection UI for a single Personal Agent, driven only
-  by the shared ACP state machine.
+- A runtime-dependency-free Web connection UI for a single Personal Agent,
+  driven only by the shared ACP state machine.
 - Safe boundaries for connection, authentication, session creation, and redaction.
 - A source-pinned text-turn core implementing CHAT-01..14 from the [chat vertical slice contract](docs/chat-vertical-slice-contract.md).
 
@@ -63,19 +63,27 @@ The accepted connection baseline is documented in [docs/acp-contract.md](docs/ac
 ## Local verification
 
 Node.js 22 or later is required (the smoke harness uses Node's global
-`WebSocket`). No package installation is required. The deterministic connection contract suite
-uses a local fake ACP server; the E2E uses the fixed OpenAB image already proven
-by T0b, with network disabled and no model prompt:
+`WebSocket`). Install the exact development dependencies from the lockfile. The
+deterministic connection/turn suite uses a local fake ACP server; the
+Chromium-only Playwright gate exercises the real browser DOM boundary; the E2E
+uses the fixed OpenAB image already proven by T0b, with network disabled and no
+model prompt:
 
 ```bash
+npm ci
 npm test
+npx playwright install chromium
+npm run test:browser
 npm run test:e2e
 ```
 
-`npm run test:e2e` is an opt-in local integration check, not a CI requirement:
-it requires Docker plus the T0b fixture checkout. By default it looks for the
-sibling `../openab-product-strategy/t0b-fixture`; another checkout can be named
-explicitly without embedding a local path in code:
+GitHub Actions runs both `npm test` and `npm run test:browser`; browser coverage
+is deliberately limited to Chromium and the high-value literal-render/Stop
+contracts. `npm run test:e2e` remains an opt-in local integration check rather
+than a CI requirement: it requires Docker plus the T0b fixture checkout. By
+default it looks for the sibling `../openab-product-strategy/t0b-fixture`;
+another checkout can be named explicitly without embedding a local path in
+code:
 
 ```bash
 OPENAB_STRATEGY_ROOT=/path/to/openab-product-strategy npm run test:e2e
@@ -95,8 +103,9 @@ fixture and a real browser. The fixed OpenAB image E2E also passes without a
 model prompt. The text-turn core now implements `session/prompt`, ordered text
 updates, terminal stop reasons, bounded cancellation, deadlines, disconnects,
 and late-frame fencing against the fake ACP server. The thin chat UI implements
-the CHAT-15 literal-text boundary. The repository still contains no provider
-credential, provider-backed prompt smoke, AWS bootstrap, or deployment
+the CHAT-15 literal-text boundary, with the XSS-shaped content and Stop flow
+enforced by a Chromium Playwright gate. The repository still contains no
+provider credential, provider-backed prompt smoke, AWS bootstrap, or deployment
 infrastructure.
 
 ## License
